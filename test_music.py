@@ -3,7 +3,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 import discord
 
-from music_cog import MusicCog, MusicPlayer, Song, YTDLSource
+from music_cog import MusicCog, Song
 from music_bot import MusicBot
 
 @pytest.fixture
