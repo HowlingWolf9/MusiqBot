@@ -11,6 +11,14 @@ import json
 import os
 import functools
 import traceback
+import random
+
+def check_dj(interaction: discord.Interaction) -> bool:
+    if getattr(interaction.user.guild_permissions, "manage_guild", False):
+        return True
+    if hasattr(interaction.user, "roles"):
+        return any(role.name.lower() == "dj" for role in interaction.user.roles)
+    return False
 
 ytdl_format_options = {
     "format": "bestaudio/best",
@@ -92,6 +100,19 @@ class MusicPlayer:
         self.np_msg = None
 
         self.player_task = self.bot.loop.create_task(self.player_loop())
+
+    def shuffle(self):
+        items = list(self.queue._queue)
+        random.shuffle(items)
+        self.queue._queue.clear()
+        self.queue._queue.extend(items)
+
+    def remove(self, index: int):
+        if 0 <= index < len(self.queue._queue):
+            item = self.queue._queue[index]
+            del self.queue._queue[index]
+            return item
+        raise IndexError("Queue index out of range")
 
     async def get_related_video(self, url):
         match = re.search(r"v=([a-zA-Z0-9_-]+)", url)
@@ -322,15 +343,25 @@ class SearchSelect(discord.ui.Select):
 
         await player.queue.put(song)
 
-        self.disabled = True
-        await interaction.message.edit(view=self.view)
+        try:
+            await interaction.message.delete()
+        except Exception:
+            pass
 
 
 class SearchView(discord.ui.View):
     def __init__(self, entries, user, cog):
-        super().__init__(timeout=60)
+        super().__init__(timeout=300)
         self.user = user
         self.add_item(SearchSelect(entries, cog))
+        self.message = None
+
+    async def on_timeout(self):
+        if self.message:
+            try:
+                await self.message.delete()
+            except Exception:
+                pass
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user != self.user:
@@ -367,6 +398,8 @@ class PlayerView(discord.ui.View):
     async def pause_resume(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
+        if not check_dj(interaction):
+            return await interaction.response.send_message("❌ You need the 'DJ' role or Manage Server permissions to do this.", ephemeral=True)
         vc = interaction.guild.voice_client
         if not vc:
             return await interaction.response.send_message(
@@ -389,6 +422,8 @@ class PlayerView(discord.ui.View):
 
     @discord.ui.button(style=discord.ButtonStyle.secondary, emoji="⏭️")
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not check_dj(interaction):
+            return await interaction.response.send_message("❌ You need the 'DJ' role or Manage Server permissions to do this.", ephemeral=True)
         vc = interaction.guild.voice_client
         if vc and (vc.is_playing() or vc.is_paused()):
             vc.stop()
@@ -400,6 +435,8 @@ class PlayerView(discord.ui.View):
 
     @discord.ui.button(style=discord.ButtonStyle.danger, emoji="⏹️")
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not check_dj(interaction):
+            return await interaction.response.send_message("❌ You need the 'DJ' role or Manage Server permissions to do this.", ephemeral=True)
         self.player.queue._queue.clear()
         self.player.history.clear()
         vc = interaction.guild.voice_client
@@ -416,6 +453,42 @@ class MusicCog(commands.Cog):
         self.players = {}
         self.settings_file = "music_settings.json"
         self.settings = self.load_settings()
+        self.empty_channel_timers = {}
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member, before, after):
+        if member.bot:
+            return
+
+        voice_client = member.guild.voice_client
+        if not voice_client:
+            return
+
+        if after.channel == voice_client.channel:
+            if member.guild.id in self.empty_channel_timers:
+                self.empty_channel_timers[member.guild.id].cancel()
+                del self.empty_channel_timers[member.guild.id]
+
+        if before.channel == voice_client.channel and after.channel != voice_client.channel:
+            non_bot_members = [m for m in voice_client.channel.members if not m.bot]
+            if len(non_bot_members) == 0:
+                if member.guild.id in self.empty_channel_timers:
+                    self.empty_channel_timers[member.guild.id].cancel()
+
+                async def disconnect_after_timeout():
+                    try:
+                        await asyncio.sleep(300)
+                        vc = member.guild.voice_client
+                        if vc and vc.channel:
+                            members = [m for m in vc.channel.members if not m.bot]
+                            if len(members) == 0:
+                                await self.cleanup(member.guild)
+                    except asyncio.CancelledError:
+                        pass
+                    finally:
+                        self.empty_channel_timers.pop(member.guild.id, None)
+
+                self.empty_channel_timers[member.guild.id] = self.bot.loop.create_task(disconnect_after_timeout())
 
     def load_settings(self):
         if os.path.exists(self.settings_file):
@@ -587,12 +660,18 @@ class MusicCog(commands.Cog):
 
         entries = data["entries"][:5]
         view = SearchView(entries, interaction.user, self)
-        await interaction.followup.send("Please select a song:", view=view)
+        
+        self.get_player(interaction)
+        
+        msg = await interaction.followup.send("Please select a song:", view=view, wait=True)
+        view.message = msg
 
     @app_commands.command(name="skip", description="Skip the currently playing song")
     async def skip(self, interaction: discord.Interaction):
         if not await self.verify_voice(interaction):
             return
+        if not check_dj(interaction):
+            return await interaction.response.send_message("❌ You need the 'DJ' role or Manage Server permissions to use this command.", ephemeral=True)
 
         voice_client = interaction.guild.voice_client
         if not voice_client or (
@@ -609,6 +688,8 @@ class MusicCog(commands.Cog):
     async def stop(self, interaction: discord.Interaction):
         if not await self.verify_voice(interaction):
             return
+        if not check_dj(interaction):
+            return await interaction.response.send_message("❌ You need the 'DJ' role or Manage Server permissions to use this command.", ephemeral=True)
 
         player = self.get_player(interaction)
         player.queue._queue.clear()
@@ -626,6 +707,8 @@ class MusicCog(commands.Cog):
     async def pause(self, interaction: discord.Interaction):
         if not await self.verify_voice(interaction):
             return
+        if not check_dj(interaction):
+            return await interaction.response.send_message("❌ You need the 'DJ' role or Manage Server permissions to use this command.", ephemeral=True)
 
         if (
             interaction.guild.voice_client
@@ -642,6 +725,8 @@ class MusicCog(commands.Cog):
     async def resume(self, interaction: discord.Interaction):
         if not await self.verify_voice(interaction):
             return
+        if not check_dj(interaction):
+            return await interaction.response.send_message("❌ You need the 'DJ' role or Manage Server permissions to use this command.", ephemeral=True)
 
         if (
             interaction.guild.voice_client
@@ -747,6 +832,8 @@ class MusicCog(commands.Cog):
     async def leave(self, interaction: discord.Interaction):
         if not await self.verify_voice(interaction):
             return
+        if not check_dj(interaction):
+            return await interaction.response.send_message("❌ You need the 'DJ' role or Manage Server permissions to use this command.", ephemeral=True)
 
         if interaction.guild.voice_client:
             await self.cleanup(interaction.guild)
@@ -784,6 +871,34 @@ class MusicCog(commands.Cog):
                 self.bot.loop.call_soon_threadsafe(player.next.set)
             else:
                 self.bot.loop.create_task(player.prefetch_autoplay())
+
+    @app_commands.command(name="shuffle", description="Shuffle the current queue")
+    async def shuffle(self, interaction: discord.Interaction):
+        if not await self.verify_voice(interaction):
+            return
+        if not check_dj(interaction):
+            return await interaction.response.send_message("❌ You need the 'DJ' role or Manage Server permissions to use this command.", ephemeral=True)
+        
+        player = self.get_player(interaction)
+        if player.queue.empty():
+            return await interaction.response.send_message("The queue is empty.", ephemeral=True)
+            
+        player.shuffle()
+        await interaction.response.send_message("🔀 Shuffled the queue.")
+
+    @app_commands.command(name="remove", description="Remove a song from the queue by its index")
+    async def remove(self, interaction: discord.Interaction, index: int):
+        if not await self.verify_voice(interaction):
+            return
+        if not check_dj(interaction):
+            return await interaction.response.send_message("❌ You need the 'DJ' role or Manage Server permissions to use this command.", ephemeral=True)
+            
+        player = self.get_player(interaction)
+        try:
+            song = player.remove(index - 1)
+            await interaction.response.send_message(f"🗑️ Removed **{song.title}** from the queue.")
+        except IndexError:
+            await interaction.response.send_message("❌ Invalid queue index. Check the queue for valid numbers.", ephemeral=True)
 
 
 async def setup(bot):
