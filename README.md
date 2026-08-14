@@ -2,12 +2,30 @@
 
 MuhazBot is a feature-rich, asynchronous Discord Music Bot built using `discord.py` and `yt-dlp`. It's designed to stream high-quality audio into voice channels with robust queue management, interactive UIs, and automated lifecycle handling.
 
-## 🏗️ Architecture & Core Files
+## 🏗️ Architecture & Core Structure
 
-* **`music_bot.py`**: The application entry point. Initializes the `commands.Bot` instance, sets up necessary intents, handles globally syncing slash commands, and loads the main `music_cog` extension.
-* **`music_cog.py`**: The brain of the bot. Contains the `MusicCog` (housing all slash commands and event listeners), the `MusicPlayer` (manages the playback loop, stream creation, and state per guild), and `Song/YTDLSource` models.
-* **`test_music.py`**: A robust `pytest` suite utilizing `pytest-asyncio` and `unittest.mock` to validate critical integrations like permission boundaries, mock-voice connections, and timer teardowns.
-* **`music_settings.json`**: A local JSON datastore used to persist guild-specific configurations (like `autoplay` toggles and user-defined `volume` levels) between restarts.
+```
+MuhazBot/
+├── music_bot.py                 # Bot client, command tree, and application entrypoint
+├── music_cog.py                 # Backward-compatible extension facade
+├── music/                       # Modular music package
+│   ├── config.py                # FFmpeg & YTDL streaming configurations
+│   ├── models.py                # Song dataclass and LoopMode enum
+│   ├── audio.py                 # YTDLSource stream resolution and search ranking
+│   ├── permissions.py           # DJ role and management permission guards
+│   ├── utils.py                 # Progress bar generator & safe message cleanup
+│   ├── services/                # External services & search integrations
+│   │   ├── spotify.py           # Spotify track resolution via oEmbed
+│   │   └── autocomplete.py      # Fast YouTube query autocompletion with caching
+│   ├── views/                   # Interactive Discord UI components
+│   │   ├── player_view.py       # Persistent Now Playing interactive buttons
+│   │   ├── queue_view.py        # Paginated queue display
+│   │   └── search_view.py       # Ephemeral dropdown search selector
+│   ├── player.py                # MusicPlayer state machine, queue loop & autoplay
+│   └── cog.py                   # MusicCog: Slash commands & Discord event listeners
+├── test_music.py                # Comprehensive pytest test suite
+└── music_settings.json          # Persistent JSON store for guild settings
+```
 
 ## 🚀 Deployment & Scripts
 
