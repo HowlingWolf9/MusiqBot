@@ -4,6 +4,10 @@ import discord
 from discord import app_commands
 
 
+def _to_choice(s: str) -> app_commands.Choice[str]:
+    return app_commands.Choice(name=s[:100], value=s[:100])
+
+
 async def fetch_song_autocomplete(
     interaction: discord.Interaction,
     current: str,
@@ -17,9 +21,7 @@ async def fetch_song_autocomplete(
 
     query = current.strip().lower()
     if query in cache:
-        return [
-            app_commands.Choice(name=s[:100], value=s[:100]) for s in cache[query]
-        ]
+        return [_to_choice(s) for s in cache[query] if isinstance(s, str)]
 
     try:
         api_url = f"https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q={urllib.parse.quote(query)}"
@@ -33,15 +35,12 @@ async def fetch_song_autocomplete(
                     and len(data) > 1
                     and isinstance(data[1], list)
                 ):
-                    suggestions = data[1][:25]
-                    cache[query] = suggestions
-                    if len(cache) > 500:
-                        cache.clear()
-                    return [
-                        app_commands.Choice(name=s[:100], value=s[:100])
-                        for s in suggestions
-                        if isinstance(s, str)
-                    ]
+                    suggestions = [s for s in data[1][:25] if isinstance(s, str)]
+                    if suggestions:
+                        cache[query] = suggestions
+                        if len(cache) > 500:
+                            cache.clear()
+                        return [_to_choice(s) for s in suggestions]
     except Exception:
         pass
-    return [app_commands.Choice(name=current[:100], value=current[:100])]
+    return [_to_choice(current)]

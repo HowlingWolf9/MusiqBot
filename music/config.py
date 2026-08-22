@@ -7,6 +7,9 @@ ytdl_format_options = {
     "no_warnings": True,
     "default_search": "ytsearch",
     "source_address": "0.0.0.0",
+    # Pinned to clients whose stream URLs ffmpeg can open without 403s.
+    # Newer defaults (e.g. android_vr) serve music-catalog URLs that reject
+    # non-app user agents / lack PO tokens at playback time.
     "extractor_args": {
         "youtube": {
             "player_client": ["android", "web"]

@@ -7,7 +7,7 @@ import os
 import aiohttp
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 import yt_dlp
 
 from music.audio import YTDLSource
@@ -20,6 +20,7 @@ from music.services.spotify import resolve_spotify as resolve_spotify_service
 from music.views.player_view import PlayerView
 from music.views.queue_view import QueueView
 from music.views.search_view import SearchView
+from music.utils import delete_message_safe
 
 logger = logging.getLogger(__name__)
 
@@ -34,15 +35,88 @@ class MusicCog(commands.Cog):
         self.voice_connect_locks = {}
         self.autocomplete_cache = {}
         self.session = None
+        self.orphan_index_file = "music_orphans.json"
+        self.orphan_index = self._load_orphan_index()
 
     async def get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
             self.session = aiohttp.ClientSession()
         return self.session
 
+    async def cog_load(self):
+        await self._sweep_orphans()
+        self.empty_channel_sweep.start()
+
     async def cog_unload(self):
+        self.empty_channel_sweep.cancel()
         if self.session and not self.session.closed:
             await self.session.close()
+
+    def _load_orphan_index(self):
+        try:
+            if os.path.exists(self.orphan_index_file):
+                with open(self.orphan_index_file, "r") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return {str(k): list(v) for k, v in data.items() if isinstance(v, list)}
+        except Exception:
+            logger.warning("Failed to load orphan message index", exc_info=True)
+        return {}
+
+    def _save_orphan_index(self):
+        try:
+            tmp = f"{self.orphan_index_file}.tmp"
+            with open(tmp, "w") as f:
+                json.dump(self.orphan_index, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.orphan_index_file)
+        except Exception:
+            logger.warning("Failed to save orphan message index", exc_info=True)
+
+    def track_message(self, guild_id, msg):
+        """Register a public UI message so a future boot can delete it even
+        if this process dies before cleaning up (watchmedo reload etc.)."""
+        if not msg or not getattr(msg, "guild", None):
+            return
+        gid = str(guild_id)
+        entries = self.orphan_index.setdefault(gid, [])
+        record = {"channel_id": msg.channel.id, "message_id": msg.id}
+        if record not in entries:
+            entries.append(record)
+            if len(entries) > 50:  # bound growth per guild
+                del entries[: len(entries) - 50]
+            self._save_orphan_index()
+
+    def untrack_message(self, guild_id, msg):
+        if not msg:
+            return
+        gid = str(guild_id)
+        entries = self.orphan_index.get(gid, [])
+        record = {"channel_id": msg.channel.id, "message_id": msg.id}
+        if record in entries:
+            entries.remove(record)
+            if not entries:
+                self.orphan_index.pop(gid, None)
+            self._save_orphan_index()
+
+    async def _sweep_orphans(self):
+        """Delete UI messages left behind by a previous process instance."""
+        total = sum(len(v) for v in self.orphan_index.values())
+        if not total:
+            return
+        logger.info(f"Orphan sweep: removing {total} leftover message(s)")
+        for gid in list(self.orphan_index.keys()):
+            for record in list(self.orphan_index.get(gid, [])):
+                channel = self.bot.get_channel(record["channel_id"])
+                if channel is None:
+                    continue
+                partial = channel.get_partial_message(record["message_id"])
+                if await delete_message_safe(partial):
+                    self.orphan_index[gid].remove(record)
+            if not self.orphan_index.get(gid):
+                self.orphan_index.pop(gid, None)
+        self._save_orphan_index()
 
     async def cog_app_command_error(
         self, interaction: discord.Interaction, error: app_commands.AppCommandError
@@ -63,6 +137,14 @@ class MusicCog(commands.Cog):
             else:
                 await interaction.followup.send(msg, ephemeral=True)
             return
+        msg = "❌ An unexpected error occurred. Please try again later."
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(msg, ephemeral=True)
+            else:
+                await interaction.followup.send(msg, ephemeral=True)
+        except Exception:
+            pass
         logger.error(f"App command error in {interaction.command}: {error}", exc_info=True)
 
     @commands.Cog.listener()
@@ -72,32 +154,16 @@ class MusicCog(commands.Cog):
                 if member.guild.id in self.players:
                     await self.cleanup(member.guild)
                 return
-            else:
-                # Bot moved to another voice channel
-                voice_client = member.guild.voice_client
-                if voice_client and voice_client.channel:
-                    non_bot_members = [m for m in voice_client.channel.members if not m.bot]
-                    if len(non_bot_members) == 0:
-                        if member.guild.id in self.empty_channel_timers:
-                            self.empty_channel_timers[member.guild.id].cancel()
 
-                        async def disconnect_after_timeout():
-                            try:
-                                await asyncio.sleep(300)
-                                vc = member.guild.voice_client
-                                if vc and vc.channel:
-                                    members = [m for m in vc.channel.members if not m.bot]
-                                    if len(members) == 0:
-                                        await self.cleanup(member.guild)
-                            except asyncio.CancelledError:
-                                pass
-                            finally:
-                                self.empty_channel_timers.pop(member.guild.id, None)
-
-                        self.empty_channel_timers[member.guild.id] = (
-                            self.bot.loop.create_task(disconnect_after_timeout())
-                        )
-                return
+            # Bot joined/moved to a voice channel
+            voice_client = member.guild.voice_client
+            if voice_client and voice_client.channel:
+                non_bot_members = [
+                    m for m in voice_client.channel.members if not m.bot
+                ]
+                if len(non_bot_members) == 0:
+                    self._start_empty_channel_timer(member.guild)
+            return
 
         if member.bot:
             return
@@ -107,9 +173,7 @@ class MusicCog(commands.Cog):
             return
 
         if after.channel == voice_client.channel:
-            if member.guild.id in self.empty_channel_timers:
-                self.empty_channel_timers[member.guild.id].cancel()
-                del self.empty_channel_timers[member.guild.id]
+            self._cancel_empty_channel_timer(member.guild.id)
 
         if (
             before.channel == voice_client.channel
@@ -117,24 +181,70 @@ class MusicCog(commands.Cog):
         ):
             non_bot_members = [m for m in voice_client.channel.members if not m.bot]
             if len(non_bot_members) == 0:
-                if member.guild.id in self.empty_channel_timers:
-                    self.empty_channel_timers[member.guild.id].cancel()
+                self._start_empty_channel_timer(member.guild)
 
-                async def disconnect_after_timeout():
-                    try:
-                        await asyncio.sleep(300)
-                        vc = member.guild.voice_client
-                        if vc and vc.channel:
-                            members = [m for m in vc.channel.members if not m.bot]
-                            if len(members) == 0:
-                                await self.cleanup(member.guild)
-                    except asyncio.CancelledError:
-                        pass
-                    finally:
-                        self.empty_channel_timers.pop(member.guild.id, None)
+    def _cancel_empty_channel_timer(self, guild_id):
+        timer = self.empty_channel_timers.pop(guild_id, None)
+        if timer:
+            timer.cancel()
 
-                self.empty_channel_timers[member.guild.id] = (
-                    self.bot.loop.create_task(disconnect_after_timeout())
+    def _start_empty_channel_timer(self, guild):
+        """Begin (or keep) the 5-minute countdown to leave an empty VC.
+
+        If a countdown is already running, repeat events do NOT reset the
+        clock: the bot leaves 5 minutes after the channel first emptied.
+        """
+        guild_id = guild.id
+        if guild_id in self.empty_channel_timers:
+            return
+
+        async def countdown():
+            try:
+                await asyncio.sleep(300)
+                vc = guild.voice_client
+                if (
+                    vc
+                    and vc.channel
+                    and not any(not m.bot for m in vc.channel.members)
+                ):
+                    await self.cleanup(guild)
+            except asyncio.CancelledError:
+                pass
+            finally:
+                # Remove the entry only while this task is still the one
+                # registered, so a cancelled predecessor can't evict its
+                # replacement from the dict.
+                current = asyncio.current_task()
+                if self.empty_channel_timers.get(guild_id) is current:
+                    del self.empty_channel_timers[guild_id]
+
+        self.empty_channel_timers[guild_id] = self.bot.loop.create_task(countdown())
+
+    @tasks.loop(minutes=1)
+    async def empty_channel_sweep(self):
+        await self._sweep_empty_channels()
+
+    async def _sweep_empty_channels(self):
+        """Safety net: start the empty-channel countdown even when the
+        leaving voice_state_update event was missed (reconnects, dropped
+        gateway events, restart-while-alone)."""
+        for guild in list(self.bot.guilds):
+            try:
+                vc = guild.voice_client
+                if not vc or not vc.is_connected() or not vc.channel:
+                    continue
+                if any(not m.bot for m in vc.channel.members):
+                    continue
+                if guild.id in self.empty_channel_timers:
+                    continue
+                logger.info(
+                    f"Empty-channel sweep: starting disconnect countdown "
+                    f"in guild {guild.id}"
+                )
+                self._start_empty_channel_timer(guild)
+            except Exception:
+                logger.exception(
+                    f"Error during empty-channel sweep for guild {guild.id}"
                 )
 
     def load_settings(self):
@@ -177,12 +287,7 @@ class MusicCog(commands.Cog):
         return player
 
     async def cleanup(self, guild):
-        try:
-            if guild.id in self.empty_channel_timers:
-                self.empty_channel_timers[guild.id].cancel()
-                del self.empty_channel_timers[guild.id]
-        except Exception:
-            pass
+        self._cancel_empty_channel_timer(guild.id)
         self.voice_connect_locks.pop(guild.id, None)
         try:
             await guild.voice_client.disconnect()
@@ -190,14 +295,37 @@ class MusicCog(commands.Cog):
             pass
         try:
             player = self.players.pop(guild.id)
-            await player.delete_message_safe(player.np_msg)
-            player.np_msg = None
-            await player.delete_message_safe(player.queue_msg)
-            player.queue_msg = None
+            for attr in ("np_msg", "queue_msg"):
+                msg = getattr(player, attr, None)
+                if await delete_message_safe(msg):
+                    self.untrack_message(guild.id, msg)
+                setattr(player, attr, None)
+            for song in list(player.queue._queue):
+                if song.added_msg and await delete_message_safe(song.added_msg):
+                    self.untrack_message(guild.id, song.added_msg)
+                song.added_msg = None
+            if player.current and player.current.added_msg:
+                player.current.added_msg = None
             player.clear_queue()
             player.player_task.cancel()
         except KeyError:
             pass
+
+    async def shutdown_cleanup(self):
+        """Best-effort teardown on process shutdown/dev reload.
+
+        Removes every tracked UI message and disconnects players so channels
+        aren't littered with dead Now Playing / Queue embeds after restart.
+        """
+        guilds = [p.guild for p in list(self.players.values())]
+        logger.info(f"Shutdown cleanup: {len(guilds)} active player(s)")
+        for guild in guilds:
+            try:
+                await asyncio.wait_for(self.cleanup(guild), timeout=8)
+            except asyncio.TimeoutError:
+                logger.warning(f"Shutdown cleanup timed out for guild {guild.id}")
+            except Exception:
+                logger.exception(f"Shutdown cleanup failed for guild {guild.id}")
 
     async def ensure_voice_client(
         self, interaction: discord.Interaction
@@ -404,27 +532,24 @@ class MusicCog(commands.Cog):
                 )
                 msg = await interaction.channel.send(embed=embed)
                 song.added_msg = msg
-                try:
-                    await interaction.followup.send(
-                        f"✅ Added **{song.title}** to the queue.", ephemeral=True
-                    )
-                except Exception:
-                    pass
+                self.track_message(interaction.guild.id, msg)
             else:
                 msg = await interaction.channel.send(
                     f"⏳ Loading track: **{song.title}**..."
                 )
                 song.added_msg = msg
-                try:
-                    await interaction.followup.send(
-                        f"⏳ Loading track: **{song.title}**...", ephemeral=True
-                    )
-                except Exception:
-                    pass
+                self.track_message(interaction.guild.id, msg)
 
             await player.queue.put(song)
         finally:
             player.is_loading = False
+
+        # Clear the deferred "Bot is thinking..." placeholder — the outcome is
+        # already visible through the public channel messages above.
+        try:
+            await interaction.delete_original_response()
+        except Exception:
+            pass
 
     @app_commands.command(
         name="search", description="Search YouTube Music and choose from results"
@@ -496,7 +621,7 @@ class MusicCog(commands.Cog):
         player.manual_skip = True
         voice_client.stop()
         await interaction.response.send_message(
-            "⏭️ Skipped the current song.", ephemeral=True
+            "⏭️ Skipped the current song."
         )
 
     @app_commands.command(name="stop", description="Stop the music and clear the queue")
@@ -519,7 +644,7 @@ class MusicCog(commands.Cog):
             voice_client.stop()
 
         await interaction.response.send_message(
-            "⏹️ Stopped the music and cleared the queue.", ephemeral=True
+            "⏹️ Stopped the music and cleared the queue."
         )
 
     @app_commands.command(name="pause", description="Pause the music")
@@ -538,7 +663,7 @@ class MusicCog(commands.Cog):
         ):
             interaction.guild.voice_client.pause()
             await interaction.response.send_message(
-                "⏸️ Paused the music.", ephemeral=True
+                "⏸️ Paused the music."
             )
         else:
             await interaction.response.send_message(
@@ -561,7 +686,7 @@ class MusicCog(commands.Cog):
         ):
             interaction.guild.voice_client.resume()
             await interaction.response.send_message(
-                "▶️ Resumed the music.", ephemeral=True
+                "▶️ Resumed the music."
             )
         else:
             await interaction.response.send_message(
@@ -581,10 +706,9 @@ class MusicCog(commands.Cog):
         embed = view.build_embed()
 
         await interaction.response.defer(ephemeral=True)
-        msg = await interaction.channel.send(embed=embed, view=view)
+        msg = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
         view.message = msg
         player.queue_msg = msg
-        await interaction.followup.send("🎶 Queue updated below.", ephemeral=True)
 
     @app_commands.command(
         name="nowplaying", description="Show the currently playing song"
@@ -604,6 +728,7 @@ class MusicCog(commands.Cog):
         embed = player.build_np_embed()
         view = PlayerView(self, player)
         player.np_msg = await interaction.channel.send(embed=embed, view=view)
+        self.track_message(interaction.guild.id, player.np_msg)
         await interaction.response.send_message(
             "🎶 Displaying Now Playing.", ephemeral=True
         )
@@ -641,7 +766,7 @@ class MusicCog(commands.Cog):
         await self.save_settings_async()
 
         await interaction.response.send_message(
-            f"🔊 Changed volume to {vol}%", ephemeral=True
+            f"🔊 Changed volume to {vol}%"
         )
 
     @app_commands.command(
@@ -659,7 +784,7 @@ class MusicCog(commands.Cog):
         if interaction.guild.voice_client:
             await self.cleanup(interaction.guild)
             await interaction.response.send_message(
-                "🛑 Cleared the queue and disconnected.", ephemeral=True
+                "🛑 Cleared the queue and disconnected."
             )
         else:
             await interaction.response.send_message(
@@ -690,14 +815,11 @@ class MusicCog(commands.Cog):
 
         status = "enabled" if player.autoplay else "disabled"
         await interaction.response.send_message(
-            f"📻 Autoplay is now **{status}**.", ephemeral=True
+            f"📻 Autoplay is now **{status}**."
         )
 
         if player.autoplay and player.queue.empty() and player.history:
-            if not player.current:
-                self.bot.loop.call_soon_threadsafe(player.next.set)
-            else:
-                self.bot.loop.create_task(player.prefetch_autoplay())
+            self.bot.loop.create_task(player.prefetch_autoplay())
 
     @app_commands.command(name="loop", description="Set loop mode (off, track, queue)")
     @app_commands.choices(
@@ -727,7 +849,7 @@ class MusicCog(commands.Cog):
             except Exception:
                 pass
         await interaction.response.send_message(
-            f"🔁 Loop mode set to **{mode.name}**.", ephemeral=True
+            f"🔁 Loop mode set to **{mode.name}**."
         )
 
     @app_commands.command(name="shuffle", description="Shuffle the current queue")
@@ -748,7 +870,7 @@ class MusicCog(commands.Cog):
 
         player.shuffle()
         await interaction.response.send_message(
-            "🔀 Shuffled the queue.", ephemeral=True
+            "🔀 Shuffled the queue."
         )
 
     @app_commands.command(
@@ -767,7 +889,7 @@ class MusicCog(commands.Cog):
         try:
             song = player.remove(index - 1)
             await interaction.response.send_message(
-                f"🗑️ Removed **{song.title}** from the queue.", ephemeral=True
+                f"🗑️ Removed **{song.title}** from the queue."
             )
         except IndexError:
             await interaction.response.send_message(
@@ -790,7 +912,7 @@ class MusicCog(commands.Cog):
         player = self.get_player(interaction)
         player.clear_queue()
         await interaction.response.send_message(
-            "🧹 Cleared the queue.", ephemeral=True
+            "🧹 Cleared the queue."
         )
 
     @app_commands.command(
@@ -811,7 +933,7 @@ class MusicCog(commands.Cog):
         try:
             song = player.move(from_index - 1, to_index - 1)
             await interaction.response.send_message(
-                f"↕️ Moved **{song.title}** to position {to_index}.", ephemeral=True
+                f"↕️ Moved **{song.title}** to position {to_index}."
             )
         except IndexError:
             await interaction.response.send_message(
@@ -859,7 +981,7 @@ class MusicCog(commands.Cog):
             player.is_seeking = True
             interaction.guild.voice_client.stop()
             await interaction.response.send_message(
-                f"⏩ Seeked to `{timestamp}`.", ephemeral=True
+                f"⏩ Seeked to `{timestamp}`."
             )
         except Exception as e:
             player.seek_position = None
@@ -891,7 +1013,7 @@ class MusicCog(commands.Cog):
             player.is_seeking = True
             interaction.guild.voice_client.stop()
             await interaction.response.send_message(
-                "🔄 Replaying current song.", ephemeral=True
+                "🔄 Replaying current song."
             )
         except Exception as e:
             player.seek_position = None

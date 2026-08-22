@@ -1,6 +1,6 @@
 import discord
 from music.models import Song
-from music.utils import delete_message_safe
+from music.utils import coerce_duration, delete_message_safe
 
 
 class SearchSelect(discord.ui.Select):
@@ -14,12 +14,8 @@ class SearchSelect(discord.ui.Select):
             title = entry.get("title") or "Unknown Title"
             if len(title) > 90:
                 title = title[:90] + "..."
-            duration = entry.get("duration")
-            if duration:
-                mins, secs = divmod(duration, 60)
-                desc = f"{mins}:{secs:02d}"
-            else:
-                desc = "Unknown duration"
+            duration = coerce_duration(entry.get("duration"))
+            desc = f"{duration // 60}:{duration % 60:02d}" if duration else "Unknown duration"
             options.append(
                 discord.SelectOption(
                     label=f"{i + 1}. {title}", description=desc, value=str(i)
@@ -74,27 +70,23 @@ class SearchSelect(discord.ui.Select):
                 )
                 msg = await interaction.channel.send(embed=embed)
                 song.added_msg = msg
-                try:
-                    await interaction.followup.send(
-                        f"✅ Added **{song.title}** to the queue.", ephemeral=True
-                    )
-                except Exception:
-                    pass
+                self.cog.track_message(interaction.guild.id, msg)
             else:
                 msg = await interaction.channel.send(
                     f"⏳ Loading track: **{song.title}**..."
                 )
                 song.added_msg = msg
-                try:
-                    await interaction.followup.send(
-                        f"⏳ Loading track: **{song.title}**...", ephemeral=True
-                    )
-                except Exception:
-                    pass
+                self.cog.track_message(interaction.guild.id, msg)
 
             await player.queue.put(song)
         finally:
             player.is_loading = False
+
+        # Clear the deferred "Bot is thinking..." placeholder
+        try:
+            await interaction.delete_original_response()
+        except Exception:
+            pass
 
         if self.view and getattr(self.view, "message", None):
             await delete_message_safe(self.view.message)

@@ -2,8 +2,9 @@ import discord
 
 
 def check_dj(interaction: discord.Interaction) -> bool:
-    if getattr(interaction.user.guild_permissions, "manage_guild", False) or getattr(
-        interaction.user.guild_permissions, "administrator", False
+    perms = getattr(interaction.user, "guild_permissions", None)
+    if perms and (
+        getattr(perms, "manage_guild", False) or getattr(perms, "administrator", False)
     ):
         return True
 

@@ -272,7 +272,7 @@ async def test_seek_valid_and_invalid_timestamps(cog, interaction):
     # Seeking when voice client is playing
     await cog.seek.callback(cog, interaction, timestamp="1:30")
     assert player.seek_position == 90
-    interaction.response.send_message.assert_called_with("⏩ Seeked to `1:30`.", ephemeral=True)
+    interaction.response.send_message.assert_called_with("⏩ Seeked to `1:30`.")
         
     # Invalid timestamp format (e.g., negative or too many parts)
     interaction.response.send_message.reset_mock()
@@ -315,7 +315,7 @@ async def test_volume_command_bounds(cog, interaction):
     # Valid volume
     interaction.response.send_message.reset_mock()
     await cog.volume.callback(cog, interaction, vol=75)
-    interaction.response.send_message.assert_called_with("🔊 Changed volume to 75%", ephemeral=True)
+    interaction.response.send_message.assert_called_with("🔊 Changed volume to 75%")
     assert cog.get_player(interaction).volume == 0.75
 
 
@@ -911,7 +911,11 @@ async def test_loop_queue_respects_user_and_autoplay_priority(cog, interaction):
 def test_ytdl_format_options_priority():
     from music_cog import ytdl_format_options
     assert "bestaudio/best" in ytdl_format_options["format"]
-    assert "android" in ytdl_format_options.get("extractor_args", {}).get("youtube", {}).get("player_client", [])
+    player_clients = (
+        ytdl_format_options.get("extractor_args", {}).get("youtube", {}).get("player_client", [])
+    )
+    assert "android" in player_clients
+    assert "web" in player_clients
 
 
 def test_is_valid_music_entry():
@@ -981,6 +985,420 @@ async def test_get_related_video_filters_non_music_and_history(cog, interaction)
             assert "song1111111" not in res
             assert "queued11111" not in res
             assert "reaction111" not in res
+
+
+def test_float_duration_song_builds_np_embed(cog, interaction):
+    player = cog.get_player(interaction)
+    player.current = Song({"title": "Float Track", "webpage_url": "http://yt.com", "duration": 215.7}, interaction.user)
+    player.current_start_time = None
+
+    # Must not raise ValueError: Unknown format code 'd' for object of type 'float'
+    embed = player.build_np_embed()
+    assert "00:00 / 03:35" in embed.description
+    assert player.current.duration == 215
+
+
+def test_float_duration_search_select_options():
+    from music_cog import SearchSelect
+
+    entries = [{"title": "Float Track", "duration": 199.9}]
+    select = SearchSelect(entries, MagicMock())
+    assert select.options[0].description == "3:19"
+
+
+@pytest.mark.asyncio
+async def test_autoplay_toggle_idle_spawns_prefetch_task(cog, interaction):
+    player = cog.get_player(interaction)
+    player.autoplay = False
+    player.history = ["http://yt.com/previous"]
+
+    with patch.object(cog.bot.loop, "create_task", side_effect=lambda coro: coro.close() or MagicMock()) as mock_ct:
+        await cog.autoplay.callback(cog, interaction)
+        assert player.autoplay is True
+        mock_ct.assert_called_once()
+
+    # The created task must be prefetch_autoplay (wakes idle loop via queue.put),
+    # not a no-op next.set()
+    assert interaction.response.send_message.call_args[0][0] == "📻 Autoplay is now **enabled**."
+
+
+@pytest.mark.asyncio
+async def test_autocomplete_cache_hit_filters_non_string_entries(cog, interaction):
+    cog.autocomplete_cache.clear()
+    cog.autocomplete_cache["bad query"] = ["Good Suggestion", {"not": "a string"}, 12345]
+
+    res = await cog.song_autocomplete(interaction, "bad query")
+    assert len(res) == 1
+    assert res[0].name == "Good Suggestion"
+
+
+@pytest.mark.asyncio
+async def test_autocomplete_cache_stores_filtered_suggestions(cog, interaction):
+    cog.autocomplete_cache.clear()
+    with patch("music_cog.MusicCog.get_session") as mock_session_fn:
+        mock_session = MagicMock()
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value=["q", [{"junk": 1}, "Real Result"]])
+        mock_cm = MagicMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_session.get.return_value = mock_cm
+        mock_session_fn.return_value = mock_session
+
+        res = await cog.song_autocomplete(interaction, "filtered query")
+        assert len(res) == 1
+        assert res[0].name == "Real Result"
+        assert cog.autocomplete_cache["filtered query"] == ["Real Result"]
+
+
+@pytest.mark.asyncio
+async def test_unexpected_app_command_error_responds_to_user(cog, interaction):
+    err = app_commands.AppCommandError(RuntimeError("boom"))
+    await cog.cog_app_command_error(interaction, err)
+    interaction.response.send_message.assert_called_with(
+        "❌ An unexpected error occurred. Please try again later.", ephemeral=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_unexpected_error_after_response_uses_followup(cog, interaction):
+    interaction.response.is_done = MagicMock(return_value=True)
+    err = app_commands.AppCommandError(RuntimeError("boom"))
+    await cog.cog_app_command_error(interaction, err)
+    interaction.followup.send.assert_called_with(
+        "❌ An unexpected error occurred. Please try again later.", ephemeral=True
+    )
+
+
+def test_check_dj_user_without_guild_permissions(interaction):
+    class FakeUser:
+        roles = []
+
+    interaction.user = FakeUser()
+    assert check_dj(interaction) is False
+
+
+def test_coerce_duration_variants():
+    from music_cog import coerce_duration
+
+    assert coerce_duration(215.7) == 215
+    assert coerce_duration("199") == 199
+    assert coerce_duration("garbage") == 0
+    assert coerce_duration(None) == 0
+    assert coerce_duration(0) == 0
+    assert coerce_duration(float("nan")) == 0
+
+
+def test_search_select_garbage_duration_string():
+    from music_cog import SearchSelect
+
+    entries = [{"title": "Weird Track", "duration": "3:19"}]
+    select = SearchSelect(entries, MagicMock())
+    assert select.options[0].description == "Unknown duration"
+
+
+def test_silence_primer_prepends_zero_frames_then_passes_through():
+    from music.audio import SilencePrimer
+
+    class FakeSource(discord.AudioSource):
+        def __init__(self):
+            self.calls = 0
+
+        def read(self):
+            self.calls += 1
+            return b"\x01" * 10
+
+        def cleanup(self):
+            self.cleaned = True
+
+    fake = FakeSource()
+    primer = SilencePrimer(fake, frames=3)
+
+    assert primer.is_opus() is False
+    for _ in range(3):
+        frame = primer.read()
+        assert frame == b"\x00" * 3840
+    assert fake.calls == 0
+
+    assert primer.read() == b"\x01" * 10
+    assert fake.calls == 1
+
+    primer.cleanup()
+    assert fake.cleaned
+
+
+@pytest.mark.asyncio
+async def test_create_source_priming_wraps_inside_transformer():
+    from music.audio import YTDLSource, SilencePrimer
+
+    class DummyFFmpeg(discord.AudioSource):
+        def read(self):
+            return b"\x00" * 3840
+
+    data = {"url": "http://stream.example/audio", "title": "Primed Track"}
+
+    with patch("music.audio.discord.FFmpegPCMAudio", return_value=DummyFFmpeg()):
+        src = await YTDLSource.create_source(data, prime_frames=25)
+        assert isinstance(src.original, SilencePrimer)
+        assert src.original.remaining == 25
+        # PCMVolumeTransformer stays outermost so /volume keeps working
+        assert src.volume == 0.5
+
+        plain = await YTDLSource.create_source(data)
+        assert not isinstance(plain.original, SilencePrimer)
+
+
+@pytest.mark.asyncio
+async def test_create_source_passes_user_agent_to_ffmpeg():
+    from music.audio import YTDLSource
+
+    class DummyFFmpeg(discord.AudioSource):
+        def read(self):
+            return b"\x00" * 3840
+
+    captured = {}
+
+    def fake_ffmpeg(url, **kwargs):
+        captured.update(kwargs)
+        return DummyFFmpeg()
+
+    with patch("music.audio.discord.FFmpegPCMAudio", side_effect=fake_ffmpeg):
+        await YTDLSource.create_source(
+            {"url": "http://stream.example/a", "title": "T",
+             "http_headers": {"User-Agent": "TestAgent/1.0"}}
+        )
+        assert "-user_agent 'TestAgent/1.0'" in captured["before_options"]
+
+        captured.clear()
+        await YTDLSource.create_source({"url": "http://stream.example/b", "title": "T"})
+        assert "-user_agent" not in captured["before_options"]
+
+        captured.clear()
+        await YTDLSource.create_source(
+            {"url": "http://stream.example/c", "title": "T",
+             "http_headers": {"User-Agent": "bad'agent\\weird"}}
+        )
+        assert "-user_agent 'badagentweird'" in captured["before_options"]
+
+        captured.clear()
+        await YTDLSource.create_source(
+            {"url": "http://stream.example/d", "title": "T",
+             "http_headers": {"User-Agent": "'"}}
+        )
+        assert "-user_agent" not in captured["before_options"]
+
+
+def test_is_instant_fail_matrix(cog, interaction):
+    import time as _time
+
+    player = cog.get_player(interaction)
+
+    # No playback started / no current track -> not a failure
+    assert player._is_instant_fail() is False
+
+    player.current = Song({"title": "Long Track", "webpage_url": "http://x", "duration": 200}, interaction.user)
+
+    # Recent start + long known duration -> instant fail
+    player.last_play_start = _time.time()
+    assert player._is_instant_fail() is True
+
+    # Stale start (played longer than threshold) -> normal completion
+    player.last_play_start = _time.time() - 5
+    assert player._is_instant_fail() is False
+
+    # Known ultra-short track that finished fast -> legitimate, not a failure
+    player.last_play_start = _time.time()
+    player.current = Song({"title": "Short Clip", "webpage_url": "http://x", "duration": 1}, interaction.user)
+    assert player._is_instant_fail() is False
+
+    # Unknown duration ended instantly -> treated as failure
+    player.current = Song({"title": "Unknown Length", "webpage_url": "http://x"}, interaction.user)
+    assert player._is_instant_fail() is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [LoopMode.TRACK, LoopMode.QUEUE])
+async def test_instant_fail_bypasses_loop_requeue(cog, interaction, mode):
+    player = cog.get_player(interaction)
+    player.channel = AsyncMock()
+    player.loop_mode = mode
+    song = Song({"title": "Dead Track", "webpage_url": "http://yt.com/dead", "duration": 200}, interaction.user)
+    await player.queue.put(song)
+
+    interaction.guild.voice_client.is_connected = MagicMock(return_value=True)
+
+    def fake_play(source, after=None):
+        # Simulate ffmpeg dying instantly: EOF fires the after-callback
+        player.next.set()
+
+    interaction.guild.voice_client.play = MagicMock(side_effect=fake_play)
+
+    with patch("music_cog.YTDLSource.create_source", return_value=MagicMock()):
+        player.bot.is_closed = MagicMock(side_effect=[False, True])
+        await player.player_loop()
+
+    # Dead track must NOT be re-queued by either loop mode
+    assert player.queue.empty()
+    assert player.current is None
+    player.channel.send.assert_called_with(
+        "⚠️ **Dead Track** is unavailable — skipping."
+    )
+
+
+@pytest.mark.asyncio
+async def test_empty_channel_timer_repeat_events_keep_countdown(cog):
+    guild = MagicMock()
+    guild.id = 424242
+    voice_client = MagicMock()
+    guild.voice_client = voice_client
+    voice_client.channel.members = [MagicMock(bot=True)]
+
+    member = MagicMock(bot=False, guild=guild)
+    before = MagicMock(channel=voice_client.channel)
+    after = MagicMock(channel=None)
+
+    await cog.on_voice_state_update(member, before, after)
+    first_timer = cog.empty_channel_timers[guild.id]
+
+    # Another user leaves -> event fires again but must NOT reset the clock
+    await cog.on_voice_state_update(member, before, after)
+    assert cog.empty_channel_timers[guild.id] is first_timer
+
+
+@pytest.mark.asyncio
+async def test_empty_channel_sweep_starts_and_skips_timers(cog):
+    alone_guild = MagicMock()
+    alone_guild.id = 111
+    vc_alone = MagicMock()
+    vc_alone.is_connected.return_value = True
+    vc_alone.channel.members = [MagicMock(bot=True)]
+    alone_guild.voice_client = vc_alone
+
+    busy_guild = MagicMock()
+    busy_guild.id = 222
+    vc_busy = MagicMock()
+    vc_busy.is_connected.return_value = True
+    vc_busy.channel.members = [MagicMock(bot=True), MagicMock(bot=False)]
+    busy_guild.voice_client = vc_busy
+
+    cog.bot.guilds = [alone_guild, busy_guild]
+
+    await cog._sweep_empty_channels()
+
+    assert alone_guild.id in cog.empty_channel_timers
+    assert busy_guild.id not in cog.empty_channel_timers
+
+
+@pytest.mark.asyncio
+async def test_countdown_cleanup_fires_and_pop_guard(cog):
+    real_loop = asyncio.get_running_loop()
+    cog.bot.loop = real_loop
+    cog.cleanup = AsyncMock()
+
+    with patch("asyncio.sleep", new=AsyncMock(return_value=None)):
+        # Fire-through: countdown completes -> cleanup once, own entry removed
+        g1 = MagicMock()
+        g1.id = 700
+        g1.voice_client = MagicMock()
+        g1.voice_client.channel.members = [MagicMock(bot=True)]
+        cog._start_empty_channel_timer(g1)
+        t1 = cog.empty_channel_timers[g1.id]
+        await t1
+        cog.cleanup.assert_awaited_once_with(g1)
+        assert g1.id not in cog.empty_channel_timers
+
+        # Eviction guard: a cancelled/superseded task must not evict its replacement
+        g2 = MagicMock()
+        g2.id = 701
+        g2.voice_client = MagicMock()
+        g2.voice_client.channel.members = [MagicMock(bot=True)]
+        cog._start_empty_channel_timer(g2)
+        stale = cog.empty_channel_timers[g2.id]
+        sentinel = object()
+        cog.empty_channel_timers[g2.id] = sentinel  # simulate replacement
+        await stale  # stale finishes; its finally must keep the sentinel
+        assert cog.empty_channel_timers[g2.id] is sentinel
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cleanup_cleans_every_guild_player(cog, interaction):
+    cog.get_player(interaction)  # guild 12345
+
+    other_guild = MagicMock()
+    other_guild.id = 9999
+    cog.players[other_guild.id] = MagicMock(guild=other_guild)
+
+    cog.cleanup = AsyncMock()
+    await cog.shutdown_cleanup()
+
+    assert cog.cleanup.await_count == 2
+    cog.cleanup.assert_any_await(interaction.guild)
+    cog.cleanup.assert_any_await(other_guild)
+
+
+@pytest.mark.asyncio
+async def test_play_clears_thinking_placeholder(cog, interaction):
+    with patch(
+        "music_cog.YTDLSource.extract_info",
+        return_value={"title": "T", "webpage_url": "http://yt.com/x"},
+    ):
+        await cog.play.callback(cog, interaction, url="http://yt.com/x")
+    interaction.delete_original_response.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_orphan_sweep_deletes_leftovers_and_updates_index(cog):
+    # Channel must be a MagicMock: get_partial_message() is synchronous.
+    # An AsyncMock would turn it into a coroutine and break delete_message_safe.
+    channel = MagicMock()
+    partial = AsyncMock()
+    channel.get_partial_message.return_value = partial
+
+    stale = {"channel_id": 42, "message_id": 9001}
+    keep = {"channel_id": 42, "message_id": 9002}
+    cog.orphan_index = {"12345": [stale, dict(keep)]}
+    cog._save_orphan_index = MagicMock()
+    cog.bot.get_channel = MagicMock(return_value=channel)
+
+    # First delete succeeds, second fails -> stays indexed
+    partial.delete.side_effect = [None, RuntimeError("boom")]
+
+    await cog._sweep_orphans()
+
+    assert stale not in cog.orphan_index["12345"]
+    assert keep in cog.orphan_index["12345"]
+    assert channel.get_partial_message.call_count == 2
+
+
+def test_track_and_untrack_message_roundtrip(cog, interaction):
+    msg = MagicMock()
+    msg.channel.id = 777
+    msg.id = 888
+
+    cog.track_message(interaction.guild.id, msg)
+    assert {"channel_id": 777, "message_id": 888} in cog.orphan_index[str(interaction.guild.id)]
+
+    cog.untrack_message(interaction.guild.id, msg)
+    assert str(interaction.guild.id) not in cog.orphan_index
+
+
+def test_should_prime_gating(cog, interaction):
+    import time as _time
+
+    player = cog.get_player(interaction)
+
+    # Fresh player (never played) counts as idle -> prime
+    assert player.last_active_ts == 0.0
+    assert player._should_prime() is True
+
+    # Recent activity -> no priming needed
+    player.last_active_ts = _time.time()
+    assert player._should_prime() is False
+
+    # Stale activity beyond threshold -> prime
+    player.last_active_ts = _time.time() - 5
+    assert player._should_prime() is True
 
 
 

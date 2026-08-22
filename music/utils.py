@@ -1,9 +1,18 @@
-async def delete_message_safe(msg):
+async def delete_message_safe(msg) -> bool:
     if msg:
         try:
             await msg.delete()
+            return True
         except Exception:
             pass
+    return False
+
+
+def coerce_duration(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def create_progress_bar(elapsed: int, total: int, length: int = 14) -> str:

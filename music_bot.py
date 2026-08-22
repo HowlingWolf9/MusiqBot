@@ -1,10 +1,15 @@
+import asyncio
+import contextlib
+import fcntl
+import logging
+import signal
+
 import discord
 from discord import app_commands
 from discord.ext import commands
-import os
 from dotenv import load_dotenv
 
-import logging
+import os
 
 logging.basicConfig(
     level=logging.INFO,
@@ -81,4 +86,41 @@ async def sync(ctx):
 
 
 if __name__ == "__main__":
-    bot.run(os.getenv("DISCORD_TOKEN"))
+    # Single-instance guard: the OS releases this lock automatically on
+    # process death (even SIGKILL), preventing overlapping bots from
+    # watchmedo restarts, orphaned shells, or double script invocations.
+    _lock_file = open("/tmp/muhazbot.lock", "w")
+    try:
+        fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        logging.getLogger(__name__).error(
+            "Another MuhazBot instance is already running — exiting."
+        )
+        raise SystemExit(1)
+
+    async def _on_signal():
+        # Release the single-instance guard FIRST so watchmedo's replacement
+        # can start immediately while this process finishes its own teardown.
+        with contextlib.suppress(Exception):
+            fcntl.flock(_lock_file, fcntl.LOCK_UN)
+        logging.getLogger(__name__).info(
+            "Shutdown signal received — cleaning up tracked messages..."
+        )
+        cog = bot.get_cog("MusicCog")
+        if cog and hasattr(cog, "shutdown_cleanup"):
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(cog.shutdown_cleanup(), timeout=15)
+        with contextlib.suppress(Exception):
+            await bot.close()
+
+    async def runner():
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            # NotImplementedError on non-Unix loops; fall back to defaults there
+            with contextlib.suppress(NotImplementedError):
+                loop.add_signal_handler(
+                    sig, lambda: asyncio.create_task(_on_signal())
+                )
+        await bot.start(os.getenv("DISCORD_TOKEN"))
+
+    asyncio.run(runner())

@@ -13,6 +13,11 @@ from music.views.player_view import PlayerView
 
 logger = logging.getLogger(__name__)
 
+# Playback starting after this much idle time gets primed with silence so
+# Discord doesn't drop the track's opening seconds on a cold voice session.
+PRIME_IDLE_SECONDS = 1.0
+PRIMER_FRAMES = 25  # ~500ms of 20ms frames
+
 
 NON_MUSIC_PATTERNS = [
     r"\breaction\b",
@@ -135,6 +140,8 @@ class MusicPlayer:
 
         self.current = None
         self.current_start_time = None
+        self.last_active_ts = 0.0
+        self.last_play_start = None
         self.volume = 0.5
         self.autoplay = False
         self.loop_mode = LoopMode.OFF
@@ -153,6 +160,23 @@ class MusicPlayer:
     @property
     def is_busy(self) -> bool:
         return self.current is not None or not self.queue.empty() or self.is_loading
+
+    def _should_prime(self) -> bool:
+        return (time.time() - self.last_active_ts) > PRIME_IDLE_SECONDS
+
+    def _is_instant_fail(self) -> bool:
+        """True when playback ended almost immediately after starting.
+
+        Indicates the stream never actually played (403 / instant EOF).
+        Tracks with a known short duration are exempt to avoid flagging
+        legitimately tiny clips as failures.
+        """
+        if self.last_play_start is None or self.current is None:
+            return False
+        if time.time() - self.last_play_start >= 1.5:
+            return False
+        duration = self.current.duration or 0
+        return duration == 0 or duration > 2
 
     def get_queue_items(self) -> list:
         return list(self.queue._queue)
@@ -374,6 +398,7 @@ class MusicPlayer:
                         )
                         msg = await self.channel.send(embed=embed)
                         song.added_msg = msg
+                        self.cog.track_message(self.guild.id, msg)
                         await self.queue.put(song)
         except Exception as e:
             logger.error(f"Error prefetching autoplay: {e}", exc_info=True)
@@ -457,7 +482,8 @@ class MusicPlayer:
                     # Wait 5 minutes for the next song before disconnecting
                     song = await asyncio.wait_for(self.queue.get(), timeout=300)
                 except asyncio.TimeoutError:
-                    await self.delete_message_safe(self.np_msg)
+                    if await delete_message_safe(self.np_msg):
+                        self.cog.untrack_message(self.guild.id, self.np_msg)
                     self.np_msg = None
                     await self.delete_message_safe(self.queue_msg)
                     self.queue_msg = None
@@ -466,6 +492,7 @@ class MusicPlayer:
             # Re-fetch stream URL if older than 1 hour or seeking
             self.is_loading = True
             try:
+                prime_frames = PRIMER_FRAMES if self._should_prime() else 0
                 if (
                     seek is None
                     and hasattr(song, "extracted_at")
@@ -473,11 +500,13 @@ class MusicPlayer:
                     and song.data.get("url")
                 ):
                     source = await YTDLSource.create_source(
-                        song.data, loop=self.bot.loop, seek=seek
+                        song.data, loop=self.bot.loop, seek=seek,
+                        prime_frames=prime_frames,
                     )
                 else:
                     source = await YTDLSource.create_source(
-                        song.url, loop=self.bot.loop, seek=seek
+                        song.url, loop=self.bot.loop, seek=seek,
+                        prime_frames=prime_frames,
                     )
             except Exception as e:
                 logger.error(f"Error creating audio source: {e}", exc_info=True)
@@ -502,8 +531,8 @@ class MusicPlayer:
             if len(self.history) > 100:
                 self.history.pop(0)
 
-            self.current.source = source
             source.volume = self.volume
+            self.current.source = source
 
             # Wait briefly if voice client is connecting or reconnecting
             for _ in range(10):
@@ -518,6 +547,7 @@ class MusicPlayer:
             # Reset skip/stop flags right before playback begins
             self.manual_skip = False
             self.manual_stop = False
+            self.last_play_start = time.time()
 
             try:
                 self.guild.voice_client.play(
@@ -537,16 +567,19 @@ class MusicPlayer:
                 continue
 
             if hasattr(song, "added_msg") and song.added_msg:
-                await self.delete_message_safe(song.added_msg)
+                if await delete_message_safe(song.added_msg):
+                    self.cog.untrack_message(self.guild.id, song.added_msg)
                 song.added_msg = None
 
-            await self.delete_message_safe(self.np_msg)
+            if await delete_message_safe(self.np_msg):
+                self.cog.untrack_message(self.guild.id, self.np_msg)
             self.np_msg = None
 
             embed = self.build_np_embed()
             view = PlayerView(self.cog, self)
             try:
                 self.np_msg = await self.channel.send(embed=embed, view=view)
+                self.cog.track_message(self.guild.id, self.np_msg)
             except Exception:
                 pass
 
@@ -557,6 +590,7 @@ class MusicPlayer:
                 self.bot.loop.create_task(self.prefetch_autoplay())
 
             await self.next.wait()
+            self.last_active_ts = time.time()
 
             # Handle seeking continuity: do not clear current track
             if self.is_seeking:
@@ -583,6 +617,23 @@ class MusicPlayer:
 
             # Natural track completion - Handle Loop Modes
             if self.current:
+                # A track that "finishes" almost instantly never actually played;
+                # notify instead of silently skipping (e.g. stream 403 / EOF) and
+                # bypass loop re-queueing so dead tracks can't wedge loop mode.
+                if self._is_instant_fail():
+                    logger.warning(
+                        f"Track ended instantly, likely unavailable: {self.current.title}"
+                    )
+                    try:
+                        await self.channel.send(
+                            f"⚠️ **{self.current.title}** is unavailable — skipping."
+                        )
+                    except Exception:
+                        pass
+                    self.current = None
+                    self.current_start_time = None
+                    continue
+
                 if self.loop_mode == LoopMode.TRACK:
                     new_song = Song(
                         self.current.data,

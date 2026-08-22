@@ -42,6 +42,33 @@ def select_best_search_entry(entries):
     return sorted_entries[0][1]
 
 
+class SilencePrimer(discord.AudioSource):
+    """Prepends a short burst of silence before real audio.
+
+    Discord drops packets sent before a cold voice session's media path is
+    fully live (fresh join, or resume after manual stop/idle). Priming the
+    pipe with disposable silence protects the opening seconds of the track.
+    """
+
+    FRAME_SIZE = 3840  # 20ms of 48kHz s16le stereo PCM
+
+    def __init__(self, source, frames: int = 25):
+        self.source = source
+        self.remaining = frames
+
+    def read(self):
+        if self.remaining > 0:
+            self.remaining -= 1
+            return b"\x00" * self.FRAME_SIZE
+        return self.source.read()
+
+    def is_opus(self):
+        return False
+
+    def cleanup(self):
+        return self.source.cleanup()
+
+
 class YTDLSource(discord.PCMVolumeTransformer):
     def __init__(self, source, *, data, volume=0.5):
         super().__init__(source, volume)
@@ -78,7 +105,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
         return data
 
     @classmethod
-    async def create_source(cls, url_or_data, *, loop=None, seek=None):
+    async def create_source(cls, url_or_data, *, loop=None, seek=None, prime_frames=0):
         if isinstance(url_or_data, dict):
             data = url_or_data
         else:
@@ -93,5 +120,18 @@ class YTDLSource(discord.PCMVolumeTransformer):
         if seek is not None:
             opts["before_options"] = f"-ss {seek} " + opts.get("before_options", "")
 
+        # Reuse yt-dlp's client-matched User-Agent so googlevideo doesn't 403
+        # ffmpeg's default "Lavf" agent on stricter stream URLs.
+        user_agent = (data.get("http_headers") or {}).get("User-Agent")
+        if user_agent:
+            # Strip characters that would break shlex parsing of before_options
+            user_agent = user_agent.replace("'", "").replace("\\", "")
+        if user_agent:
+            opts["before_options"] = (
+                f"-user_agent '{user_agent}' " + opts["before_options"]
+            )
+
         ffmpeg_audio = discord.FFmpegPCMAudio(data["url"], **opts)
+        if prime_frames > 0:
+            ffmpeg_audio = SilencePrimer(ffmpeg_audio, prime_frames)
         return cls(ffmpeg_audio, data=data)

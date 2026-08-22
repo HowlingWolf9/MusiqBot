@@ -56,12 +56,12 @@ class PlayerView(discord.ui.View):
         if vc.is_playing():
             vc.pause()
             await interaction.response.send_message(
-                "⏸️ Paused the music.", ephemeral=True
+                "⏸️ Paused the music."
             )
         elif vc.is_paused():
             vc.resume()
             await interaction.response.send_message(
-                "▶️ Resumed the music.", ephemeral=True
+                "▶️ Resumed the music."
             )
         else:
             await interaction.response.send_message(
@@ -80,7 +80,7 @@ class PlayerView(discord.ui.View):
             self.player.manual_skip = True
             vc.stop()
             await interaction.response.send_message(
-                "⏭️ Skipped the song.", ephemeral=True
+                "⏭️ Skipped the song."
             )
         else:
             await interaction.response.send_message("Nothing to skip.", ephemeral=True)
@@ -99,7 +99,7 @@ class PlayerView(discord.ui.View):
         if vc and (vc.is_playing() or vc.is_paused()):
             vc.stop()
         await interaction.response.send_message(
-            "⏹️ Stopped music and cleared the queue.", ephemeral=True
+            "⏹️ Stopped music and cleared the queue."
         )
 
     @discord.ui.button(
@@ -128,8 +128,7 @@ class PlayerView(discord.ui.View):
             )
         except Exception:
             await interaction.response.send_message(
-                f"🔁 Loop mode set to **{self.player.loop_mode.value.capitalize()}**.",
-                ephemeral=True,
+                f"🔁 Loop mode set to **{self.player.loop_mode.value.capitalize()}**."
             )
 
     @discord.ui.button(style=discord.ButtonStyle.secondary, emoji="🔀")
@@ -147,5 +146,5 @@ class PlayerView(discord.ui.View):
             )
         self.player.shuffle()
         await interaction.response.send_message(
-            "🔀 Shuffled the queue.", ephemeral=True
+            "🔀 Shuffled the queue."
         )

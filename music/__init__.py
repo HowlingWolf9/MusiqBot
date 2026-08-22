@@ -12,7 +12,7 @@ from music.player import (
 )
 from music.services.autocomplete import fetch_song_autocomplete
 from music.services.spotify import resolve_spotify
-from music.utils import create_progress_bar, delete_message_safe
+from music.utils import coerce_duration, create_progress_bar, delete_message_safe
 from music.views.player_view import PlayerView
 from music.views.queue_view import QueueView
 from music.views.search_view import SearchSelect, SearchView
@@ -21,6 +21,7 @@ __all__ = [
     "MusicCog",
     "MusicPlayer",
     "MusicQueue",
+    "coerce_duration",
     "extract_video_id",
     "is_valid_music_entry",
     "normalize_title",
