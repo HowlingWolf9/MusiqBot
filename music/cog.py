@@ -1044,7 +1044,7 @@ class MusicCog(commands.Cog):
         )
 
     @app_commands.command(
-        name="settings", description="View active server settings for MuhazBot"
+        name="settings", description="View active server settings for MusiqBot"
     )
     async def settings_cmd(self, interaction: discord.Interaction):
         if not interaction.guild:

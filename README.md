@@ -1,6 +1,6 @@
-# MuhazBot
+# MusiqBot
 
-MuhazBot is a feature-rich, asynchronous Discord Music Bot built using
+MusiqBot is a feature-rich, asynchronous Discord Music Bot built using
 `discord.py` and `yt-dlp`. It streams high-quality audio into voice channels
 with a priority-aware queue, autoplay engine, interactive UIs, and fully
 automated lifecycle handling.
@@ -51,7 +51,7 @@ commands. Full instructions: [Setup & Deployment](docs/setup.md).
 ## 🏗️ Project Structure
 
 ```
-MuhazBot/
+MusiqBot/
 ├── music_bot.py                 # Bot client, command tree, entrypoint
 ├── music_cog.py                 # Backward-compatible extension facade
 ├── music/                       # Modular music package

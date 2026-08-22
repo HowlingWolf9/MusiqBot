@@ -89,12 +89,12 @@ if __name__ == "__main__":
     # Single-instance guard: the OS releases this lock automatically on
     # process death (even SIGKILL), preventing overlapping bots from
     # watchmedo restarts, orphaned shells, or double script invocations.
-    _lock_file = open("/tmp/muhazbot.lock", "w")
+    _lock_file = open("/tmp/musiqbot.lock", "w")
     try:
         fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         logging.getLogger(__name__).error(
-            "Another MuhazBot instance is already running — exiting."
+            "Another MusiqBot instance is already running — exiting."
         )
         raise SystemExit(1)
 

@@ -1,6 +1,6 @@
 # Architecture
 
-This document explains how MuhazBot works internally: the module layout, the
+This document explains how MusiqBot works internally: the module layout, the
 player state machine, queue semantics, autoplay, audio resolution, and the
 message-lifecycle machinery that keeps channels clean.
 
@@ -39,7 +39,7 @@ music_bot.py                 Entry point: bot client, tree error filter,
    - starts the `empty_channel_sweep` task (every minute).
 4. On login (`on_ready`) the bot is ready to receive interactions. Slash
    commands must be registered once via the owner-only `!sync` prefix command.
-5. `main` acquires `/tmp/muhazbot.lock` (`fcntl.flock`, non-blocking) so only
+5. `main` acquires `/tmp/musiqbot.lock` (`fcntl.flock`, non-blocking) so only
    one instance can run per host; registers SIGTERM/SIGINT handlers.
 
 ## MusicCog Responsibilities (`music/cog.py`)

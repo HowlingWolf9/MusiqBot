@@ -1,5 +1,5 @@
 """
-MuhazBot Music Cog - Extension entrypoint and backward-compatible facade.
+MusiqBot Music Cog - Extension entrypoint and backward-compatible facade.
 All core logic is organized modularly in the `music` package.
 """
 

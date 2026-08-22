@@ -12,8 +12,8 @@
 ## Installation
 
 ```bash
-git clone <your-fork-url> MuhazBot
-cd MuhazBot
+git clone <your-fork-url> MusiqBot
+cd MusiqBot
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt            # runtime dependencies
@@ -50,7 +50,7 @@ Both are safe to delete while the bot is stopped; they are rebuilt as needed.
 
 | Script | Use case | What it does |
 |---|---|---|
-| `run_music.sh` | Day-to-day hosting | If `muhazbot.service` is active, attaches to its logs instead of starting a duplicate. Otherwise kills stale `music_bot.py` processes and starts the bot under `watchmedo auto-restart` |
+| `run_music.sh` | Day-to-day hosting | If `musiqbot.service` is active, attaches to its logs instead of starting a duplicate. Otherwise kills stale `music_bot.py` processes and starts the bot under `watchmedo auto-restart` |
 | `run_dev.sh` | Development | Runs the bot under `watchmedo auto-restart` — the process restarts whenever any `.py` file changes |
 | `setup_autostart.sh` | Server deployment | Installs a `systemctl --user` unit (see below) |
 
@@ -77,17 +77,17 @@ python music_bot.py
 ./setup_autostart.sh
 ```
 
-This writes `~/.config/systemd/user/muhazbot.service`:
+This writes `~/.config/systemd/user/musiqbot.service`:
 
 ```ini
 [Unit]
-Description=MuhazBot Discord Bot
+Description=MusiqBot Discord Bot
 After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/wolf/Projects/MuhazBot
-ExecStart=/home/wolf/Projects/MuhazBot/run_dev.sh
+WorkingDirectory=/home/wolf/Projects/MusiqBot
+ExecStart=/home/wolf/Projects/MusiqBot/run_dev.sh
 Restart=on-failure
 RestartSec=5s
 
@@ -101,10 +101,10 @@ running after you log out.
 Useful commands:
 
 ```bash
-systemctl --user status muhazbot.service   # health
-journalctl --user -u muhazbot.service -f   # follow logs
-systemctl --user restart muhazbot.service  # apply config/code changes
-systemctl --user disable --now muhazbot.service  # stop autostart
+systemctl --user status musiqbot.service   # health
+journalctl --user -u musiqbot.service -f   # follow logs
+systemctl --user restart musiqbot.service  # apply config/code changes
+systemctl --user disable --now musiqbot.service  # stop autostart
 ```
 
 Note the unit executes `run_dev.sh`, i.e. production here still uses
@@ -113,7 +113,7 @@ Note the unit executes `run_dev.sh`, i.e. production here still uses
 ## Operational Safeguards
 
 - **Single-instance lock** — `music_bot.py` takes a non-blocking exclusive
-  `flock` on `/tmp/muhazbot.lock`. A second instance exits immediately with a
+  `flock` on `/tmp/musiqbot.lock`. A second instance exits immediately with a
   log error. This prevents overlapping bots from watchmedo restarts or double
   invocations. The lock is released *first* during signal handling so a
   replacement process can start while the old one is still tearing down.
@@ -133,5 +133,5 @@ Note the unit executes `run_dev.sh`, i.e. production here still uses
 | Slash commands don't appear | Run `!sync` as owner; invite the bot with the `applications.commands` scope |
 | Tracks fail instantly with 403 / "unavailable" | yt-dlp is outdated relative to YouTube changes — `pip install -U yt-dlp`. The bot already pins `player_client: android,web` to avoid PO-token-gated clients |
 | No audio but no errors | Ensure FFmpeg is installed and on `PATH`; check the bot has **Connect/Speak** permissions in that VC |
-| `Another MuhazBot instance is already running` | A previous process still holds `/tmp/muhazbot.lock`; kill it or remove the stale lock holder (`fuser /tmp/muhazbot.lock`) |
+| `Another MusiqBot instance is already running` | A previous process still holds `/tmp/musiqbot.lock`; kill it or remove the stale lock holder (`fuser /tmp/musiqbot.lock`) |
 | Bot doesn't leave empty channels | It waits 5 minutes by design; the minute-sweep covers missed events, so persistent presence usually means a ghost member or missing permissions |

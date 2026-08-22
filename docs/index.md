@@ -1,6 +1,6 @@
-# MuhazBot Documentation
+# MusiqBot Documentation
 
-MuhazBot is a feature-rich, asynchronous Discord music bot built with
+MusiqBot is a feature-rich, asynchronous Discord music bot built with
 [`discord.py`](https://discordpy.readthedocs.io/) and
 [`yt-dlp`](https://github.com/yt-dlp/yt-dlp). It streams high-quality audio into
 voice channels with a persistent playback loop, priority-aware queueing,
