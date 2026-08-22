@@ -1,56 +1,83 @@
-# MuhazBot - Project Overview
+# MuhazBot
 
-MuhazBot is a feature-rich, asynchronous Discord Music Bot built using `discord.py` and `yt-dlp`. It's designed to stream high-quality audio into voice channels with robust queue management, interactive UIs, and automated lifecycle handling.
+MuhazBot is a feature-rich, asynchronous Discord Music Bot built using
+`discord.py` and `yt-dlp`. It streams high-quality audio into voice channels
+with a priority-aware queue, autoplay engine, interactive UIs, and fully
+automated lifecycle handling.
 
-## 🏗️ Architecture & Core Structure
+## 📚 Documentation
+
+Comprehensive documentation lives in [`docs/`](docs/):
+
+| Document | Contents |
+|---|---|
+| [**Commands Reference**](docs/commands.md) | Every slash command, Now Playing button, permission rules, response behavior |
+| [**Setup & Deployment**](docs/setup.md) | Installation, `.env` config, runtime files, run scripts, systemd autostart, troubleshooting |
+| [**Architecture**](docs/architecture.md) | Module map, player state machine, queue priority model, autoplay engine, audio pipeline, message lifecycle |
+| [**Testing & Contributing**](docs/testing.md) | Running/extending the test suite, coding conventions, contribution checklist |
+
+## 🚀 Quick Start
+
+```bash
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+echo "DISCORD_TOKEN=your-token-here" > .env    # requires FFmpeg on the system
+./run_music.sh
+```
+
+Then send `!sync` from the bot owner's account once to register slash
+commands. Full instructions: [Setup & Deployment](docs/setup.md).
+
+## ✨ Key Features
+
+- **Advanced queue management** — FIFO queue where user requests always rank
+  ahead of autoplay picks; shuffle, move, remove, clear, paginated `/queue`.
+- **Autoplay engine** — seeds a YouTube Mix from listening history when the
+  queue runs dry, filtering non-music content (reactions, tutorials,
+  podcasts...) and prefetching picks ahead of playback.
+- **Interactive UI** — persistent Now Playing embed with native buttons
+  (⏯️ ⏭️ ⏹️ 🔁 🔀), ephemeral dropdown `/search`, paginated queue browser.
+- **Rich playback control** — seek/replay, volume persistence, three loop
+  modes, Spotify link resolution, playlist ingestion (up to 100 tracks).
+- **Security & permissions** — disruptive commands restricted by a DJ check:
+  *Manage Server*/*Administrator*, a role named **DJ**, or a custom role set
+  via `/setdjrole`.
+- **Automated lifecycle** — disconnects after 5 idle minutes or an empty
+  voice channel; deletes all of its messages on stop, shutdown, crash
+  recovery, and dev reloads.
+- **Operational safety** — single-instance lock, graceful SIGTERM/SIGINT
+  teardown, atomic settings persistence.
+
+## 🏗️ Project Structure
 
 ```
 MuhazBot/
-├── music_bot.py                 # Bot client, command tree, and application entrypoint
+├── music_bot.py                 # Bot client, command tree, entrypoint
 ├── music_cog.py                 # Backward-compatible extension facade
 ├── music/                       # Modular music package
 │   ├── config.py                # FFmpeg & YTDL streaming configurations
 │   ├── models.py                # Song dataclass and LoopMode enum
-│   ├── audio.py                 # YTDLSource stream resolution and search ranking
+│   ├── audio.py                 # YTDLSource stream resolution & search ranking
 │   ├── permissions.py           # DJ role and management permission guards
 │   ├── utils.py                 # Progress bar generator & safe message cleanup
-│   ├── services/                # External services & search integrations
-│   │   ├── spotify.py           # Spotify track resolution via oEmbed
-│   │   └── autocomplete.py      # Fast YouTube query autocompletion with caching
-│   ├── views/                   # Interactive Discord UI components
-│   │   ├── player_view.py       # Persistent Now Playing interactive buttons
-│   │   ├── queue_view.py        # Paginated queue display
-│   │   └── search_view.py       # Ephemeral dropdown search selector
+│   ├── services/                # Spotify resolution, YouTube autocomplete
+│   ├── views/                   # Player / queue / search UI components
 │   ├── player.py                # MusicPlayer state machine, queue loop & autoplay
-│   └── cog.py                   # MusicCog: Slash commands & Discord event listeners
-├── test_music.py                # Comprehensive pytest test suite
-└── music_settings.json          # Persistent JSON store for guild settings
+│   └── cog.py                   # MusicCog: slash commands & event listeners
+├── test_music.py                # Comprehensive pytest test suite (~1400 lines)
+├── run_music.sh / run_dev.sh    # Launch scripts (watchmedo auto-restart)
+├── setup_autostart.sh           # systemd --user service installer
+└── music_settings.json          # Persistent per-guild settings store
 ```
 
-## 🚀 Deployment & Scripts
-
-* **`setup_autostart.sh`**: A deployment script that registers the bot as a `systemctl --user` daemon service (`muhazbot.service`), ensuring it automatically starts on boot and restarts upon failure.
-* **`run_dev.sh`**: A developer-focused startup script leveraging `watchmedo` to automatically restart the Python process whenever a `.py` file is modified.
-* **`run_music.sh`**: The standard production bash script to activate the virtual environment and execute the bot.
-
-## ✨ Key Features & Capabilities
-
-1. **Advanced Queue Management**:
-   - Supports basic FIFO queues alongside complex operations like `.shuffle()` and `.remove(index)`.
-   - **Autoplay Engine**: When the queue exhausts, the bot can query YouTube Mixes based on the user's listening history to endlessly populate related tracks.
-2. **Interactive UI Elements**:
-   - **`/search`**: Renders an ephemeral interactive dropdown select menu allowing users to pick a specific track from top search results. It automatically cleans up its own interface upon selection or timeout.
-   - **Now Playing Controls**: Sends a persistent, stylized embed housing native Discord UI buttons (Play/Pause, Skip, Stop) for immediate playback control.
-3. **Security & Permissions**:
-   - Disruptive commands (Skip, Stop, Pause, Resume, Leave, Shuffle, Remove) are tightly restricted by a `check_dj()` verifier.
-   - Users must either have **Manage Server** permissions or possess a role explicitly named **"DJ"** to interrupt playback.
-4. **Automated Lifecycle Management**:
-   - **Idle Timeout**: The internal `PlayerLoop` halts and disconnects the bot exactly 5 minutes after a queue finishes playing.
-   - **Empty Channel Detection**: An `on_voice_state_update` listener monitors the channel. If all human users leave the voice chat, a 5-minute countdown is triggered to gracefully terminate the stream and disconnect the bot, preventing bandwidth waste.
+See the [Architecture guide](docs/architecture.md) for how it all fits
+together.
 
 ## 📦 Core Dependencies
-- `discord.py` (Core Discord API wrapper)
-- `yt-dlp` (Video metadata extraction and stream resolution)
-- `PyNaCl` (Required for Discord voice connections)
-- `FFmpeg` (Underlying system dependency handling the audio streaming pipeline)
-- `pytest` / `pytest-asyncio` (Testing frameworks)
+
+- `discord.py` — Discord API wrapper
+- `yt-dlp` — video metadata extraction and stream resolution
+- `PyNaCl` — required for Discord voice connections
+- `FFmpeg` — system dependency powering the audio streaming pipeline
+- `aiohttp` + `python-dotenv` — HTTP client and env loading
+- `pytest` / `pytest-asyncio` / `pytest-mock` — testing toolchain
