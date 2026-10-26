@@ -192,13 +192,15 @@ class PlayerView(discord.ui.View):
             self.player.remove_autoplay_songs()
         else:
             self.player.stopped_by_user = False
+            self.player.manual_stop = False
             has_auto = any(
                 getattr(s, "is_autoplay", False) for s in self.player.queue._queue
             )
             if not has_auto and (self.player.current or self.player.history):
-                self.player._prefetch_task = self.cog.spawn_background(
-                    self.player.prefetch_autoplay()
-                )
+                if not self.player._prefetching:
+                    self.player._prefetch_task = self.cog.spawn_background(
+                        self.player.prefetch_autoplay()
+                    )
 
         self.update_buttons()
         status = "enabled" if self.player.autoplay else "disabled"

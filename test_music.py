@@ -2924,3 +2924,101 @@ def test_build_np_embed_autoplay_and_skip_votes(cog, interaction):
 
     assert field_dict["Autoplay"] == "`Enabled`"
     assert field_dict["Skip Votes"] == "`1/2`"
+
+
+@pytest.mark.asyncio
+async def test_stop_while_connecting_voice_client_aborts_playback(cog, interaction):
+    player = cog.get_player(interaction)
+    song = Song({"title": "Connect Track", "webpage_url": "http://yt.com/conn"}, interaction.user)
+    await player.queue.put(song)
+
+    mock_source = MagicMock()
+    mock_source.cleanup = MagicMock()
+
+    vc = interaction.guild.voice_client
+    vc.play = MagicMock()
+
+    # is_connected returns False initially, triggering sleep, during which stop occurs
+    connected_responses = [False, True, True]
+
+    def mock_is_connected():
+        return connected_responses.pop(0) if connected_responses else True
+
+    vc.is_connected = MagicMock(side_effect=mock_is_connected)
+
+    async def mock_sleep(delay):
+        if delay == 0.5:
+            await player.stop_playback()
+
+    with (
+        patch(
+            "music_cog.YTDLSource.create_source", new_callable=AsyncMock, return_value=mock_source
+        ),
+        patch("asyncio.sleep", side_effect=mock_sleep),
+    ):
+        player.bot.is_closed = MagicMock(side_effect=[False, True])
+        await player.player_loop()
+
+        vc.play.assert_not_called()
+        mock_source.cleanup.assert_called_once()
+        assert player.current is None
+        assert player.manual_stop is False
+
+
+@pytest.mark.asyncio
+async def test_autoplay_toggle_clears_manual_stop_and_triggers_prefetch(cog, interaction):
+    player = cog.get_player(interaction)
+    player.autoplay = False
+    player.manual_stop = True
+    player.stopped_by_user = True
+    player.history = ["http://yt.com/hist"]
+
+    with patch.object(player, "prefetch_autoplay", new_callable=AsyncMock) as mock_prefetch:
+        await cog.autoplay.callback(cog, interaction)
+
+        assert player.autoplay is True
+        assert player.manual_stop is False
+        assert player.stopped_by_user is False
+        mock_prefetch.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_move_promotes_autoplay_tracks_unconditionally(cog, interaction):
+    player = cog.get_player(interaction)
+    auto1 = Song({"title": "A1", "webpage_url": "http://a1"}, interaction.user, is_autoplay=True)
+    auto2 = Song({"title": "A2", "webpage_url": "http://a2"}, interaction.user, is_autoplay=True)
+
+    await player.queue.put(auto1)
+    await player.queue.put(auto2)
+
+    assert player.queue._queue[0].is_autoplay is True
+    assert player.queue._queue[1].is_autoplay is True
+
+    # Move auto2 from index 1 to index 0 (even with no user songs in queue)
+    moved = player.move(1, 0)
+    assert moved == auto2
+    assert moved.is_autoplay is False
+    assert player.queue._queue[0] == auto2
+    assert player.queue._queue[0].is_autoplay is False
+    assert player.queue._queue[1] == auto1
+
+
+@pytest.mark.asyncio
+async def test_create_source_failure_cleans_np_msg_when_queue_empty(cog, interaction):
+    player = cog.get_player(interaction)
+    np_msg = AsyncMock(spec=discord.Message)
+    player.np_msg = np_msg
+
+    song = Song({"title": "Broken Track", "webpage_url": "http://fail"}, interaction.user)
+    await player.queue.put(song)
+
+    with (
+        patch("music_cog.YTDLSource.create_source", side_effect=RuntimeError("Stream unavailable")),
+        patch.object(player, "_delete_and_untrack", new_callable=AsyncMock) as mock_untrack,
+    ):
+        player.bot.is_closed = MagicMock(side_effect=[False, True])
+        await player.player_loop()
+
+        mock_untrack.assert_any_await(np_msg)
+        assert player.np_msg is None
+

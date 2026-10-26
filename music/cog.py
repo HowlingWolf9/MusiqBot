@@ -1094,6 +1094,7 @@ class MusicCog(commands.Cog):
             player.remove_autoplay_songs()
         else:
             player.stopped_by_user = False
+            player.manual_stop = False
 
         if player.np_msg:
             try:
@@ -1117,7 +1118,8 @@ class MusicCog(commands.Cog):
             getattr(s, "is_autoplay", False) for s in player.queue._queue
         )
         if player.autoplay and not has_auto and (player.current or player.history):
-            player._prefetch_task = self.spawn_background(player.prefetch_autoplay())
+            if not player._prefetching:
+                player._prefetch_task = self.spawn_background(player.prefetch_autoplay())
 
     @app_commands.command(name="loop", description="Set loop mode (off, track, queue)")
     @app_commands.choices(

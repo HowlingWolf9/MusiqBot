@@ -298,13 +298,9 @@ class MusicPlayer:
             raise IndexError("Index out of bounds")
         item = queue_list.pop(from_index)
         queue_list.insert(to_index, item)
-        # If an autoplay song is moved into the user-priority partition, promote it
+        # If an autoplay song is moved at all via /move, promote it to a user track
         if getattr(item, "is_autoplay", False):
-            has_user_after = any(
-                not getattr(x, "is_autoplay", False) for x in queue_list[to_index + 1 :]
-            )
-            if has_user_after:
-                item.is_autoplay = False
+            item.is_autoplay = False
 
         user_items = [s for s in queue_list if not getattr(s, "is_autoplay", False)]
         auto_items = [s for s in queue_list if getattr(s, "is_autoplay", False)]
@@ -321,6 +317,9 @@ class MusicPlayer:
                     self.cog.spawn_background(self._delete_and_untrack(item.added_msg))
             except Exception:
                 pass
+        if self.queue.empty():
+            self.queue._unfinished_tasks = 0
+            self.queue._finished.set()
 
     async def stop_playback(self):
         self._stop_epoch += 1
@@ -688,7 +687,7 @@ class MusicPlayer:
                 logger.error(f"Error creating audio source: {e}", exc_info=True)
                 if hasattr(song, "added_msg") and song.added_msg:
                     await self._delete_and_untrack(song.added_msg)
-                if was_seeking and self.np_msg and self.queue.empty():
+                if self.np_msg and self.queue.empty():
                     await self._delete_and_untrack(self.np_msg)
                     self.np_msg = None
                 try:
@@ -744,6 +743,20 @@ class MusicPlayer:
             if not self.guild.voice_client or not self.guild.voice_client.is_connected():
                 self.current = None
                 return self.destroy(self.guild)
+
+            if self.manual_stop or self.stopped_by_user:
+                if hasattr(source, "cleanup"):
+                    try:
+                        source.cleanup()
+                    except Exception:
+                        pass
+                if hasattr(song, "added_msg") and song.added_msg:
+                    await self._delete_and_untrack(song.added_msg)
+                    song.added_msg = None
+                self.manual_stop = False
+                self.current = None
+                self.current_start_time = None
+                continue
 
             # Reset skip/stop flags right before playback begins
             self.manual_skip = False
@@ -806,9 +819,10 @@ class MusicPlayer:
                 and (self.history or self.current)
                 and not has_auto_song
             ):
-                self._prefetch_task = self.cog.spawn_background(
-                    self.prefetch_autoplay()
-                )
+                if not self._prefetching:
+                    self._prefetch_task = self.cog.spawn_background(
+                        self.prefetch_autoplay()
+                    )
 
             await self.next.wait()
             self.last_active_ts = time.time()

@@ -84,7 +84,7 @@ DJ-only. Applied instantly to the active source, stored on the player, and
 | `/queue` | Shows an ephemeral paginated view (10 tracks/page) of upcoming queue with formatted track durations `(mm:ss)`, total duration in footer, and a 🔄 Refresh button. Prev/next buttons; expires after 3 minutes |
 | `/shuffle` | Shuffles the queue while preserving the user-requests-before-autoplay ordering invariant |
 | `/remove index` | Removes the track at `index` (1-based, as displayed by `/queue`). Also deletes its "Added to Queue" message |
-| `/move from_index to_index` | Moves a queued track between positions (1-based). Moving an autoplay song before user songs promotes it |
+| `/move from_index to_index` | Moves a queued track between positions (1-based). Moving an autoplay song promotes it to a user track |
 | `/clear` | Removes all upcoming tracks (current track keeps playing) |
 
 ## Modes *(DJ required)*
