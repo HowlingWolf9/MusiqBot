@@ -47,6 +47,8 @@ class SearchSelect(discord.ui.Select):
 
         player = self.cog.get_player(interaction)
         player.channel = interaction.channel
+        player.stopped_by_user = False
+        player.manual_stop = False
 
         is_busy = player.is_busy
         player.is_loading = True

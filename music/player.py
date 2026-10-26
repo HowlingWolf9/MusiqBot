@@ -172,6 +172,9 @@ class MusicPlayer:
         self.is_seeking = False
         self.manual_skip = False
         self.manual_stop = False
+        self.stopped_by_user = False
+        self._stop_epoch = 0
+        self._prefetch_task = None
         # Vote skip: user IDs that voted to skip the current track
         self.skip_votes = set()
         self.np_msg = None
@@ -313,10 +316,29 @@ class MusicPlayer:
         while not self.queue.empty():
             try:
                 item = self.queue.get_nowait()
+                self.queue.task_done()
                 if item.added_msg:
                     self.cog.spawn_background(self._delete_and_untrack(item.added_msg))
             except Exception:
                 pass
+
+    async def stop_playback(self):
+        self._stop_epoch += 1
+        self.manual_stop = True
+        self.stopped_by_user = True
+        if self._prefetch_task and not self._prefetch_task.done():
+            self._prefetch_task.cancel()
+        self._prefetch_task = None
+        self._prefetching = False
+        self.clear_queue()
+        self.history.clear()
+        self.skip_votes.clear()
+        vc = getattr(self.guild, "voice_client", None)
+        if vc and (vc.is_playing() or vc.is_paused()):
+            vc.stop()
+        if self.np_msg:
+            await self._delete_and_untrack(self.np_msg)
+            self.np_msg = None
 
     def remove_autoplay_songs(self):
         items_to_keep = []
@@ -481,38 +503,59 @@ class MusicPlayer:
         return None
 
     async def prefetch_autoplay(self):
-        if self._prefetching:
+        if self._prefetching or self.manual_stop or self.stopped_by_user:
             return
         self._prefetching = True
+        self._prefetch_task = asyncio.current_task()
+        epoch = self._stop_epoch
         try:
             has_auto_song = any(
                 getattr(s, "is_autoplay", False) for s in self.queue._queue
             )
-            has_seed = self.history or (self.current and self.current.url)
+            has_seed = bool(self.history or (self.current and self.current.url))
             if not has_auto_song and self.autoplay and has_seed:
                 seed_url = self.history[-1] if self.history else self.current.url
                 next_url = await self.get_related_video(seed_url)
-                if next_url and self.autoplay:
+                if (
+                    self._stop_epoch != epoch
+                    or self.manual_stop
+                    or self.stopped_by_user
+                    or not self.autoplay
+                    or not self.history
+                ):
+                    return
+                if next_url:
                     data = await YTDLSource.extract_info(next_url, loop=self.bot.loop)
-                    if self.autoplay:
-                        song = Song(data, self.guild.me, is_autoplay=True)
-                        embed = discord.Embed(
-                            title="Added to Queue",
-                            description=f"[{song.title}]({song.url})",
-                            color=discord.Color.blue(),
-                        )
-                        embed.set_footer(
-                            text=f"Added by {song.requester.display_name} (Autoplay)",
-                            icon_url=song.requester.display_avatar.url,
-                        )
-                        msg = await self.channel.send(embed=embed)
-                        song.added_msg = msg
-                        self.cog.track_message(self.guild.id, msg)
-                        await self.queue.put(song)
+                    if (
+                        self._stop_epoch != epoch
+                        or self.manual_stop
+                        or self.stopped_by_user
+                        or not self.autoplay
+                        or not self.history
+                    ):
+                        return
+                    song = Song(data, self.guild.me, is_autoplay=True)
+                    embed = discord.Embed(
+                        title="Added to Queue",
+                        description=f"[{song.title}]({song.url})",
+                        color=discord.Color.blue(),
+                    )
+                    embed.set_footer(
+                        text=f"Added by {song.requester.display_name} (Autoplay)",
+                        icon_url=song.requester.display_avatar.url,
+                    )
+                    msg = await self.channel.send(embed=embed)
+                    song.added_msg = msg
+                    self.cog.track_message(self.guild.id, msg)
+                    await self.queue.put(song)
+        except asyncio.CancelledError:
+            pass
         except Exception as e:
             logger.error(f"Error prefetching autoplay: {e}", exc_info=True)
         finally:
             self._prefetching = False
+            if self._prefetch_task is asyncio.current_task():
+                self._prefetch_task = None
 
     def build_np_embed(self) -> discord.Embed:
         if not self.current:
@@ -554,7 +597,7 @@ class MusicPlayer:
         loop_status = self.loop_mode.value.capitalize()
         embed.add_field(name="Loop Mode", value=f"`{loop_status}`", inline=True)
 
-        autoplay_status = "On" if self.autoplay else "Off"
+        autoplay_status = "Enabled" if self.autoplay else "Disabled"
         embed.add_field(name="Autoplay", value=f"`{autoplay_status}`", inline=True)
 
         self.prune_skip_votes()
@@ -593,13 +636,23 @@ class MusicPlayer:
                 has_auto_song = any(
                     getattr(s, "is_autoplay", False) for s in self.queue._queue
                 )
-                if self.autoplay and (self.history or self.current) and not has_auto_song:
+                if (
+                    not self.stopped_by_user
+                    and not self.manual_stop
+                    and self.autoplay
+                    and self.history
+                    and not has_auto_song
+                ):
                     if not self._prefetching:
-                        self.cog.spawn_background(self.prefetch_autoplay())
+                        self._prefetch_task = self.cog.spawn_background(
+                            self.prefetch_autoplay()
+                        )
 
                 try:
                     # Wait 5 minutes for the next song before disconnecting
                     song = await asyncio.wait_for(self.queue.get(), timeout=300)
+                    if not getattr(song, "is_autoplay", False):
+                        self.stopped_by_user = False
                 except asyncio.TimeoutError:
                     if self.np_msg:
                         await self._delete_and_untrack(self.np_msg)
@@ -650,6 +703,20 @@ class MusicPlayer:
                 continue
             finally:
                 self.is_loading = False
+
+            if self.manual_stop or self.stopped_by_user:
+                if hasattr(source, "cleanup"):
+                    try:
+                        source.cleanup()
+                    except Exception:
+                        pass
+                if hasattr(song, "added_msg") and song.added_msg:
+                    await self._delete_and_untrack(song.added_msg)
+                    song.added_msg = None
+                self.manual_stop = False
+                self.current = None
+                self.current_start_time = None
+                continue
 
             self.current = song
             self.current_start_time = time.time() - (seek or 0)
@@ -732,8 +799,16 @@ class MusicPlayer:
             has_auto_song = any(
                 getattr(s, "is_autoplay", False) for s in self.queue._queue
             )
-            if self.autoplay and (self.history or self.current) and not has_auto_song:
-                self.cog.spawn_background(self.prefetch_autoplay())
+            if (
+                not self.stopped_by_user
+                and not self.manual_stop
+                and self.autoplay
+                and (self.history or self.current)
+                and not has_auto_song
+            ):
+                self._prefetch_task = self.cog.spawn_background(
+                    self.prefetch_autoplay()
+                )
 
             await self.next.wait()
             self.last_active_ts = time.time()
@@ -744,6 +819,10 @@ class MusicPlayer:
 
             # Handle manual stop: do not re-queue
             if self.manual_stop:
+                self.manual_stop = False
+                if self.np_msg:
+                    await self._delete_and_untrack(self.np_msg)
+                    self.np_msg = None
                 self.current = None
                 self.current_start_time = None
                 continue

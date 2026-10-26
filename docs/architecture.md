@@ -171,6 +171,15 @@ When `autoplay` is enabled, history exists, and no autoplay song is queued:
 6. Fallback when the Mix yields nothing: `ytsearch5:"<title> audio"` or
    `"<artist> audio"` (with `- Topic`/`VEVO` suffixes stripped).
 
+### Hardened Stop & Autoplay Lifecycle
+
+To prevent autoplay races where music restarts after `/stop` or clicking ⏹️:
+- **Prefetch Task Cancellation**: The background task running `prefetch_autoplay()` is tracked via `_prefetch_task` and cancelled immediately upon `/stop`.
+- **Generation Epoch Guard**: `_stop_epoch` increments on every stop; in-flight extractions check `_stop_epoch` and state flags after every asynchronous operation (`get_related_video`, `extract_info`) to discard late recommendations.
+- **Mid-Load Stop Abort**: If `/stop` occurs while `create_source()` is actively loading audio, playback is immediately aborted upon source completion, `source.cleanup()` is invoked, and the Now Playing embed is deleted.
+- **State Reset on User Action**: `stopped_by_user` and `manual_stop` persist until a user explicitly queues a track via `/play`, playlist import, or `/search`, preventing unintended autoplay resumption.
+- **Autoplay Toggle Purge**: Turning `/autoplay` off cancels running prefetch tasks and purges any queued autoplay songs from the priority queue.
+
 ## Audio Resolution Pipeline
 
 ### yt-dlp configuration (`config.py`)

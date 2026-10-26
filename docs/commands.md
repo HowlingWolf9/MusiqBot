@@ -48,7 +48,7 @@ one live player UI per guild. Acknowledged ephemerally.
 | `/resume` | Resumes paused playback |
 | `/skip` | DJ: skips instantly. Non-DJ in the bot's voice channel: registers a **skip vote** (see below) |
 | `/skipto index` | DJ: skips directly to track number `index` in the queue, discarding preceding tracks |
-| `/stop` | Clears queue, stops playback (history is preserved). Player idles out after 5 min |
+| `/stop` | DJ: clears queue, halts voice playback, cancels active autoplay prefetch, removes Now Playing embed, and prevents autoplay from restarting until a user queues a track |
 | `/seek timestamp` | Jumps within the current track. Accepts `90`, `1:30`, or `1:05:30` |
 | `/replay` | Restarts the current track from 0:00 |
 | `/history` | Shows recent playback history with titles and clickable links (ephemeral) |

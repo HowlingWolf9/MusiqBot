@@ -114,11 +114,7 @@ class PlayerView(discord.ui.View):
             "❌ You need the 'DJ' role or Manage Server permissions to do this.",
         ):
             return
-        self.player.manual_stop = True
-        self.player.clear_queue()
-        vc = interaction.guild.voice_client
-        if vc and (vc.is_playing() or vc.is_paused()):
-            vc.stop()
+        await self.player.stop_playback()
         await interaction.response.send_message(
             "⏹️ Stopped music and cleared the queue."
         )
@@ -189,13 +185,20 @@ class PlayerView(discord.ui.View):
         await self.cog.save_settings_async()
 
         if not self.player.autoplay:
+            if self.player._prefetch_task and not self.player._prefetch_task.done():
+                self.player._prefetch_task.cancel()
+            self.player._prefetch_task = None
+            self.player._prefetching = False
             self.player.remove_autoplay_songs()
         else:
+            self.player.stopped_by_user = False
             has_auto = any(
                 getattr(s, "is_autoplay", False) for s in self.player.queue._queue
             )
             if not has_auto and (self.player.current or self.player.history):
-                self.cog.spawn_background(self.player.prefetch_autoplay())
+                self.player._prefetch_task = self.cog.spawn_background(
+                    self.player.prefetch_autoplay()
+                )
 
         self.update_buttons()
         status = "enabled" if self.player.autoplay else "disabled"

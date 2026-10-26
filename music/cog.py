@@ -545,6 +545,8 @@ class MusicCog(commands.Cog):
             except Exception:
                 return
 
+        player.stopped_by_user = False
+        player.manual_stop = False
         count = 0
         for entry in entries[:100]:
             if not isinstance(entry, dict):
@@ -604,6 +606,8 @@ class MusicCog(commands.Cog):
 
         player = self.get_player(interaction)
         player.channel = interaction.channel
+        player.stopped_by_user = False
+        player.manual_stop = False
 
         is_busy = player.is_busy
         player.is_loading = True
@@ -844,12 +848,7 @@ class MusicCog(commands.Cog):
             return
 
         player = self.get_player(interaction)
-        player.manual_stop = True
-        player.clear_queue()
-
-        voice_client = interaction.guild.voice_client
-        if voice_client and (voice_client.is_playing() or voice_client.is_paused()):
-            voice_client.stop()
+        await player.stop_playback()
 
         await interaction.response.send_message(
             "⏹️ Stopped the music and cleared the queue."
@@ -1088,7 +1087,13 @@ class MusicCog(commands.Cog):
         await self.save_settings_async()
 
         if not player.autoplay:
+            if player._prefetch_task and not player._prefetch_task.done():
+                player._prefetch_task.cancel()
+            player._prefetch_task = None
+            player._prefetching = False
             player.remove_autoplay_songs()
+        else:
+            player.stopped_by_user = False
 
         if player.np_msg:
             try:
@@ -1112,7 +1117,7 @@ class MusicCog(commands.Cog):
             getattr(s, "is_autoplay", False) for s in player.queue._queue
         )
         if player.autoplay and not has_auto and (player.current or player.history):
-            self.spawn_background(player.prefetch_autoplay())
+            player._prefetch_task = self.spawn_background(player.prefetch_autoplay())
 
     @app_commands.command(name="loop", description="Set loop mode (off, track, queue)")
     @app_commands.choices(
@@ -1262,9 +1267,7 @@ class MusicCog(commands.Cog):
 
         discard_count = index - 1
         for _ in range(discard_count):
-            item = player.queue.remove_at(0)
-            if item.added_msg:
-                self.spawn_background(player._delete_and_untrack(item.added_msg))
+            player.remove(0)
 
         target_title = (
             player.queue._queue[0].title if not player.queue.empty() else "selected track"

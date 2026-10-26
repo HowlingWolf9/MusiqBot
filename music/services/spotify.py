@@ -23,8 +23,12 @@ async def resolve_spotify(session: aiohttp.ClientSession, url: str) -> str | Non
                         r"\s*\|\s*Spotify.*$", "", cleaned, flags=re.IGNORECASE
                     ).strip()
                     author = data.get("author_name")
-                    if author:
-                        return f"ytsearch:{cleaned} - {author}"
+                    if (
+                        author
+                        and str(author).strip()
+                        and str(author).strip().lower() not in cleaned.lower()
+                    ):
+                        return f"ytsearch:{cleaned} - {str(author).strip()}"
                     return f"ytsearch:{cleaned}"
     except Exception:
         pass

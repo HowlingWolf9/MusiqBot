@@ -2745,3 +2745,182 @@ async def test_handle_skip_request_prunes_stale_votes_before_check(cog, interact
     assert 101 not in player.skip_votes
     assert player.skip_votes == {102}
     vc.stop.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_inflight_prefetch_autoplay_and_prevents_requeue(cog, interaction):
+    player = cog.get_player(interaction)
+    player.autoplay = True
+    player.history = ["http://yt.com/prev"]
+    player.current = Song(
+        {"title": "Current Track", "webpage_url": "http://yt.com/curr"}, interaction.user
+    )
+
+    extract_started = asyncio.Event()
+    stop_called = asyncio.Event()
+
+    async def slow_extract(url, loop=None):
+        extract_started.set()
+        await stop_called.wait()
+        return {"title": "Prefetched Autoplay Song", "webpage_url": "http://yt.com/auto"}
+
+    with (
+        patch.object(
+            player, "get_related_video", new_callable=AsyncMock, return_value="http://yt.com/auto"
+        ),
+        patch("music_cog.YTDLSource.extract_info", side_effect=slow_extract),
+    ):
+        task = asyncio.create_task(player.prefetch_autoplay())
+        player._prefetch_task = task
+
+        await extract_started.wait()
+
+        # Mid-flight prefetch is running; user triggers /stop
+        await cog.stop.callback(cog, interaction)
+
+        assert player.stopped_by_user is True
+        assert player.manual_stop is True
+        assert player.history == []
+        assert player.queue.empty()
+
+        # Unblock extract
+        stop_called.set()
+        await task
+
+        # Autoplay song must NEVER have been enqueued
+        assert player.queue.empty()
+        player.channel.send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stop_while_create_source_loading_aborts_playback(cog, interaction):
+    player = cog.get_player(interaction)
+    song = Song({"title": "Loading Track", "webpage_url": "http://yt.com/load"}, interaction.user)
+    msg = AsyncMock(spec=discord.Message)
+    song.added_msg = msg
+    await player.queue.put(song)
+
+    source_cleanup_mock = MagicMock()
+    mock_source = MagicMock()
+    mock_source.cleanup = source_cleanup_mock
+
+    async def slow_create_source(*args, **kwargs):
+        player.is_loading = True
+        # User stops while source is creating
+        await player.stop_playback()
+        return mock_source
+
+    vc = interaction.guild.voice_client
+    vc.is_connected = MagicMock(return_value=True)
+    vc.play = MagicMock()
+
+    with (
+        patch("music_cog.YTDLSource.create_source", side_effect=slow_create_source),
+        patch.object(player, "_delete_and_untrack", new_callable=AsyncMock) as mock_untrack,
+    ):
+        # Terminate loop after one iteration
+        player.bot.is_closed = MagicMock(side_effect=[False, True])
+        await player.player_loop()
+
+        # voice_client.play must not have been called
+        vc.play.assert_not_called()
+        # source must be cleaned up
+        source_cleanup_mock.assert_called_once()
+        mock_untrack.assert_awaited_with(msg)
+        assert player.current is None
+
+
+@pytest.mark.asyncio
+async def test_stop_deletes_and_untracks_np_msg(cog, interaction):
+    player = cog.get_player(interaction)
+    np_msg = AsyncMock(spec=discord.Message)
+    player.np_msg = np_msg
+
+    with patch.object(player, "_delete_and_untrack", new_callable=AsyncMock) as mock_untrack:
+        await cog.stop.callback(cog, interaction)
+        mock_untrack.assert_awaited_once_with(np_msg)
+        assert player.np_msg is None
+
+
+@pytest.mark.asyncio
+async def test_player_view_stop_cleans_playback(cog, interaction):
+    from music.views.player_view import PlayerView
+
+    player = cog.get_player(interaction)
+    player.current = Song({"title": "Test Track", "webpage_url": "http://x"}, interaction.user)
+    np_msg = AsyncMock(spec=discord.Message)
+    player.np_msg = np_msg
+
+    vc = interaction.guild.voice_client
+    vc.is_playing = MagicMock(return_value=True)
+    vc.stop = MagicMock()
+
+    view = PlayerView(cog, player)
+    stop_btn = [c for c in view.children if getattr(c, "emoji", None) and str(c.emoji) == "⏹️"][0]
+
+    with patch.object(player, "_delete_and_untrack", new_callable=AsyncMock) as mock_untrack:
+        await stop_btn.callback(interaction)
+        assert player.manual_stop is True
+        assert player.stopped_by_user is True
+        assert player.queue.empty()
+        assert player.history == []
+        vc.stop.assert_called_once()
+        mock_untrack.assert_awaited_once_with(np_msg)
+        assert player.np_msg is None
+
+
+@pytest.mark.asyncio
+async def test_play_after_stop_clears_stopped_state(cog, interaction):
+    player = cog.get_player(interaction)
+    await cog.stop.callback(cog, interaction)
+    assert player.stopped_by_user is True
+    assert player.manual_stop is True
+
+    # When user queues a track via play
+    with patch("music_cog.YTDLSource.extract_info", new_callable=AsyncMock) as mock_ext:
+        mock_ext.return_value = {
+            "title": "New Track",
+            "url": "https://stream.url",
+            "webpage_url": "http://x",
+        }
+        await cog.play.callback(cog, interaction, url="http://x")
+
+        assert player.stopped_by_user is False
+        assert player.manual_stop is False
+        assert player.queue.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_clear_queue_task_accounting(cog, interaction):
+    player = cog.get_player(interaction)
+    s1 = Song({"title": "Track 1", "webpage_url": "http://1"}, interaction.user)
+    s2 = Song({"title": "Track 2", "webpage_url": "http://2"}, interaction.user)
+    await player.queue.put(s1)
+    await player.queue.put(s2)
+
+    assert player.queue._unfinished_tasks == 2
+    assert not player.queue._finished.is_set()
+
+    player.clear_queue()
+
+    assert player.queue.empty()
+    assert player.queue._unfinished_tasks == 0
+    assert player.queue._finished.is_set()
+
+
+def test_build_np_embed_autoplay_and_skip_votes(cog, interaction):
+    player = cog.get_player(interaction)
+    player.current = Song(
+        {"title": "Active Track", "webpage_url": "http://x", "duration": 180}, interaction.user
+    )
+    player.autoplay = True
+    player.skip_votes = {123}
+
+    vc = interaction.guild.voice_client
+    vc.channel.members = [MagicMock(bot=False, id=123), MagicMock(bot=False, id=456)]
+
+    embed = player.build_np_embed()
+    field_dict = {f.name: f.value for f in embed.fields}
+
+    assert field_dict["Autoplay"] == "`Enabled`"
+    assert field_dict["Skip Votes"] == "`1/2`"
