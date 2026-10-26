@@ -1,4 +1,5 @@
 import discord
+
 from music.models import Song
 from music.utils import coerce_duration, delete_message_safe
 

@@ -12,5 +12,5 @@ fi
 pkill -9 -f "music_bot.py" 2>/dev/null || true
 
 source venv/bin/activate
-exec watchmedo auto-restart --directory=./ --pattern="*.py" --recursive -- python music_bot.py
+exec watchmedo auto-restart --directory=./ --pattern="*.py" --ignore-patterns="venv/*;__pycache__/*;.git/*" --recursive -- python music_bot.py
 

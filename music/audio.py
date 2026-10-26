@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+
 import discord
 
 from music.config import ffmpeg_options, ytdl
@@ -83,10 +84,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
     @classmethod
     async def extract_info(cls, url, *, loop=None):
         if loop is None:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
         is_direct_url = url.startswith("http://") or url.startswith("https://")
         if not is_direct_url:
             if not re.match(r"^ytsearch\d*:", url, re.IGNORECASE):

@@ -1,13 +1,14 @@
-import os
-import json
-import pytest
 import asyncio
+import json
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
+
 import discord
+import pytest
 from discord import app_commands
 
-from music_cog import MusicCog, Song, LoopMode, check_dj, create_progress_bar, YTDLSource
 from music_bot import MusicBot
+from music_cog import LoopMode, MusicCog, Song, YTDLSource, check_dj, create_progress_bar
 
 
 @pytest.fixture
@@ -50,30 +51,30 @@ def interaction(bot):
     mock_interaction.response.is_done = MagicMock(return_value=False)
     mock_interaction.followup = AsyncMock()
     mock_interaction.client = bot
-    
+
     mock_vc = AsyncMock(spec=discord.VoiceClient)
     mock_vc.channel = mock_interaction.user.voice.channel
     mock_interaction.guild.voice_client = mock_vc
     mock_interaction.is_expired = MagicMock(return_value=False)
-    
+
     return mock_interaction
 
 
 @pytest.mark.asyncio
 async def test_queue_append_shuffle_remove(cog, interaction):
     player = cog.get_player(interaction)
-    
+
     song1 = Song({"title": "Track 1", "webpage_url": "http://1"}, interaction.user)
     song2 = Song({"title": "Track 2", "webpage_url": "http://2"}, interaction.user)
-    
+
     await player.queue.put(song1)
     await player.queue.put(song2)
-    
+
     assert player.queue.qsize() == 2
-    
+
     player.shuffle()
     assert player.queue.qsize() == 2
-    
+
     removed = player.remove(1)
     assert player.queue.qsize() == 1
     assert removed in [song1, song2]
@@ -82,20 +83,20 @@ async def test_queue_append_shuffle_remove(cog, interaction):
 @pytest.mark.asyncio
 async def test_move_and_clear_queue(cog, interaction):
     player = cog.get_player(interaction)
-    
+
     song1 = Song({"title": "Track 1", "webpage_url": "http://1"}, interaction.user)
     song2 = Song({"title": "Track 2", "webpage_url": "http://2"}, interaction.user)
     song3 = Song({"title": "Track 3", "webpage_url": "http://3"}, interaction.user)
-    
+
     await player.queue.put(song1)
     await player.queue.put(song2)
     await player.queue.put(song3)
-    
+
     # Move song 3 (index 2) to position 0
     moved = player.move(2, 0)
     assert moved == song3
     assert player.queue._queue[0] == song3
-    
+
     # Clear queue
     player.clear_queue()
     assert player.queue.empty()
@@ -104,9 +105,9 @@ async def test_move_and_clear_queue(cog, interaction):
 @pytest.mark.asyncio
 async def test_play_not_in_voice_channel(cog, interaction):
     interaction.user.voice = None
-    
+
     await cog.play.callback(cog, interaction, url="http://youtube.com/watch?v=123")
-    
+
     interaction.response.send_message.assert_called_with(
         "🔴 You need to join a voice channel first!", ephemeral=True
     )
@@ -120,11 +121,18 @@ async def test_dj_restricted_command_stop(cog, interaction):
     interaction.user.roles = [mock_role]
     interaction.user.guild_permissions.manage_guild = False
     interaction.user.guild_permissions.administrator = False
-    
+
     await cog.stop.callback(cog, interaction)
-    
-    if interaction.response.send_message.call_args and interaction.response.send_message.call_args[0][0] == "⏹️ Stopped the music and cleared the queue.":
-        pytest.fail("Missing permission check: Standard user was able to execute DJ-restricted command (stop).")
+
+    if (
+        interaction.response.send_message.call_args
+        and interaction.response.send_message.call_args[0][0]
+        == "⏹️ Stopped the music and cleared the queue."
+    ):
+        pytest.fail(
+            "Missing permission check: Standard user was able to execute "
+            "DJ-restricted command (stop)."
+        )
 
 
 @pytest.mark.asyncio
@@ -132,13 +140,13 @@ async def test_custom_dj_role(cog, interaction):
     custom_role = MagicMock(name="Custom DJ")
     custom_role.name = "MusicMaster"
     custom_role.id = 777
-    
+
     cog.settings[str(interaction.guild.id)] = {"dj_role_id": 777, "dj_role_name": "MusicMaster"}
-    
+
     interaction.user.roles = [custom_role]
     interaction.user.guild_permissions.manage_guild = False
     interaction.user.guild_permissions.administrator = False
-    
+
     assert check_dj(interaction) is True
 
 
@@ -146,8 +154,8 @@ async def test_custom_dj_role(cog, interaction):
 async def test_idle_auto_disconnect_timer(cog, interaction):
     player = cog.get_player(interaction)
     player.bot.is_closed = MagicMock(return_value=False)
-    
-    async def mock_wait_for(fut, timeout):
+
+    async def mock_wait_for(fut, timeout):  # noqa: ASYNC109
         if hasattr(fut, "close"):
             fut.close()
         raise asyncio.TimeoutError
@@ -162,18 +170,26 @@ async def test_idle_auto_disconnect_timer(cog, interaction):
 async def test_invalid_url_error_handling(cog, interaction):
     with patch("music_cog.YTDLSource.extract_info", side_effect=Exception("Invalid URL or format")):
         await cog.play.callback(cog, interaction, url="http://invalid.url")
-        
-    interaction.followup.send.assert_called_with("❌ An error occurred: Invalid URL or format", ephemeral=True)
+
+    interaction.followup.send.assert_called_with(
+        "❌ An error occurred: Invalid URL or format", ephemeral=True
+    )
 
 
 @pytest.mark.asyncio
 async def test_ytsearch_default_prefix(cog, interaction):
-    with patch("music_cog.ytdl.extract_info", return_value={"entries": [{"title": "Test Song", "webpage_url": "http://yt.com"}]}) as mock_ytdl:
+    with patch(
+        "music_cog.ytdl.extract_info",
+        return_value={"entries": [{"title": "Test Song", "webpage_url": "http://yt.com"}]},
+    ) as mock_ytdl:
         data = await YTDLSource.extract_info("shape of you")
         assert data["title"] == "Test Song"
         mock_ytdl.assert_called_once_with("ytsearch5:shape of you", download=False)
 
-    with patch("music_cog.ytdl.extract_info", return_value={"entries": [{"title": "Test Song", "webpage_url": "http://yt.com"}]}) as mock_ytdl:
+    with patch(
+        "music_cog.ytdl.extract_info",
+        return_value={"entries": [{"title": "Test Song", "webpage_url": "http://yt.com"}]},
+    ) as mock_ytdl:
         data2 = await YTDLSource.extract_info("ytsearch:shape of you")
         assert data2["title"] == "Test Song"
         mock_ytdl.assert_called_once_with("ytsearch5:shape of you", download=False)
@@ -185,7 +201,7 @@ async def test_ytsearch_default_prefix(cog, interaction):
 def test_progress_bar_calculation():
     bar_0 = create_progress_bar(0, 100, length=10)
     assert "🔘" in bar_0
-    
+
     bar_50 = create_progress_bar(50, 100, length=10)
     assert bar_50.startswith("━━━━━🔘")
 
@@ -194,10 +210,10 @@ def test_progress_bar_calculation():
 async def test_loop_mode_toggle(cog, interaction):
     player = cog.get_player(interaction)
     assert player.loop_mode == LoopMode.OFF
-    
+
     player.loop_mode = LoopMode.TRACK
     assert player.loop_mode == LoopMode.TRACK
-    
+
     player.loop_mode = LoopMode.QUEUE
     assert player.loop_mode == LoopMode.QUEUE
 
@@ -210,18 +226,38 @@ async def test_autocomplete_expired_interaction(cog, interaction):
 
 
 def test_autocomplete_log_filter():
-    from music_bot import AutocompleteErrorFilter
     import logging
+
+    from music_bot import AutocompleteErrorFilter
 
     flt = AutocompleteErrorFilter()
 
     # Log record with 10062 (Unknown interaction) NotFound error
-    exc = discord.NotFound(MagicMock(status=404, reason="Not Found"), {"code": 10062, "message": "Unknown interaction"})
-    record = logging.LogRecord("discord.app_commands.tree", logging.ERROR, "", 0, "Error msg", (), (type(exc), exc, None))
+    exc = discord.NotFound(
+        MagicMock(status=404, reason="Not Found"),
+        {"code": 10062, "message": "Unknown interaction"},
+    )
+    record = logging.LogRecord(
+        "discord.app_commands.tree",
+        logging.ERROR,
+        "",
+        0,
+        "Error msg",
+        (),
+        (type(exc), exc, None),
+    )
     assert flt.filter(record) is False
 
     # Standard error record should be allowed through
-    std_record = logging.LogRecord("discord.app_commands.tree", logging.ERROR, "", 0, "Normal error", (), None)
+    std_record = logging.LogRecord(
+        "discord.app_commands.tree",
+        logging.ERROR,
+        "",
+        0,
+        "Normal error",
+        (),
+        None,
+    )
     assert flt.filter(std_record) is True
 
 
@@ -254,12 +290,12 @@ async def test_concurrent_play_and_search(cog, interaction):
             {"title": "Song User 1", "webpage_url": "http://yt.com/1"},
             {"title": "Song User 2", "webpage_url": "http://yt.com/2"},
         ]
-        
+
         await asyncio.gather(
             cog.play.callback(cog, interaction, url="http://yt.com/1"),
             cog.play.callback(cog, interaction2, url="http://yt.com/2"),
         )
-        
+
         player = cog.get_player(interaction)
         assert player.queue.qsize() == 2
 
@@ -268,24 +304,30 @@ async def test_concurrent_play_and_search(cog, interaction):
 async def test_seek_valid_and_invalid_timestamps(cog, interaction):
     player = cog.get_player(interaction)
     player.current = Song({"title": "Test Track", "webpage_url": "http://yt.com"}, interaction.user)
-    
+
     # Seeking when voice client is playing
     await cog.seek.callback(cog, interaction, timestamp="1:30")
     assert player.seek_position == 90
     interaction.response.send_message.assert_called_with("⏩ Seeked to `1:30`.")
-        
+
     # Invalid timestamp format (e.g., negative or too many parts)
     interaction.response.send_message.reset_mock()
     await cog.seek.callback(cog, interaction, timestamp="-10")
-    interaction.response.send_message.assert_called_with("❌ Invalid timestamp format. Use `mm:ss` or seconds.", ephemeral=True)
+    interaction.response.send_message.assert_called_with(
+        "❌ Invalid timestamp format. Use `mm:ss` or seconds.", ephemeral=True
+    )
 
     interaction.response.send_message.reset_mock()
     await cog.seek.callback(cog, interaction, timestamp="1:2:3:4")
-    interaction.response.send_message.assert_called_with("❌ Invalid timestamp format. Use `mm:ss` or seconds.", ephemeral=True)
+    interaction.response.send_message.assert_called_with(
+        "❌ Invalid timestamp format. Use `mm:ss` or seconds.", ephemeral=True
+    )
 
     interaction.response.send_message.reset_mock()
     await cog.seek.callback(cog, interaction, timestamp="abc")
-    interaction.response.send_message.assert_called_with("❌ Invalid timestamp format. Use `mm:ss` or seconds.", ephemeral=True)
+    interaction.response.send_message.assert_called_with(
+        "❌ Invalid timestamp format. Use `mm:ss` or seconds.", ephemeral=True
+    )
 
 
 @pytest.mark.asyncio
@@ -294,23 +336,31 @@ async def test_seek_and_replay_nothing_playing(cog, interaction):
     player.current = None
 
     await cog.seek.callback(cog, interaction, timestamp="30")
-    interaction.response.send_message.assert_called_with("Nothing is currently playing to seek.", ephemeral=True)
+    interaction.response.send_message.assert_called_with(
+        "Nothing is currently playing to seek.", ephemeral=True
+    )
 
     interaction.response.send_message.reset_mock()
     await cog.replay.callback(cog, interaction)
-    interaction.response.send_message.assert_called_with("Nothing is currently playing to replay.", ephemeral=True)
+    interaction.response.send_message.assert_called_with(
+        "Nothing is currently playing to replay.", ephemeral=True
+    )
 
 
 @pytest.mark.asyncio
 async def test_volume_command_bounds(cog, interaction):
     # Invalid volume < 1
     await cog.volume.callback(cog, interaction, vol=0)
-    interaction.response.send_message.assert_called_with("Please enter a value between 1 and 100.", ephemeral=True)
+    interaction.response.send_message.assert_called_with(
+        "Please enter a value between 1 and 100.", ephemeral=True
+    )
 
     # Invalid volume > 100
     interaction.response.send_message.reset_mock()
     await cog.volume.callback(cog, interaction, vol=150)
-    interaction.response.send_message.assert_called_with("Please enter a value between 1 and 100.", ephemeral=True)
+    interaction.response.send_message.assert_called_with(
+        "Please enter a value between 1 and 100.", ephemeral=True
+    )
 
     # Valid volume
     interaction.response.send_message.reset_mock()
@@ -325,7 +375,9 @@ async def test_verify_voice_edge_cases(cog, interaction):
     interaction.guild = None
     res = await cog.verify_voice(interaction)
     assert res is False
-    interaction.response.send_message.assert_called_with("🔴 This command can only be used in a server.", ephemeral=True)
+    interaction.response.send_message.assert_called_with(
+        "🔴 This command can only be used in a server.", ephemeral=True
+    )
 
     # Restore guild, user not in voice channel
     interaction.guild = MagicMock(spec=discord.Guild)
@@ -333,7 +385,9 @@ async def test_verify_voice_edge_cases(cog, interaction):
     interaction.response.send_message.reset_mock()
     res = await cog.verify_voice(interaction)
     assert res is False
-    interaction.response.send_message.assert_called_with("🔴 You need to join a voice channel first!", ephemeral=True)
+    interaction.response.send_message.assert_called_with(
+        "🔴 You need to join a voice channel first!", ephemeral=True
+    )
 
     # User in a different voice channel than bot
     user_vc = MagicMock()
@@ -343,7 +397,10 @@ async def test_verify_voice_edge_cases(cog, interaction):
     interaction.response.send_message.reset_mock()
     res = await cog.verify_voice(interaction)
     assert res is False
-    interaction.response.send_message.assert_called_with("🔴 You must be in the same voice channel as the bot to use this.", ephemeral=True)
+    interaction.response.send_message.assert_called_with(
+        "🔴 You must be in the same voice channel as the bot to use this.",
+        ephemeral=True,
+    )
 
 
 @pytest.mark.asyncio
@@ -354,12 +411,17 @@ async def test_remove_and_move_out_of_bounds(cog, interaction):
 
     # Out of bounds remove
     await cog.remove.callback(cog, interaction, index=5)
-    interaction.response.send_message.assert_called_with("❌ Invalid queue index. Check the queue for valid numbers.", ephemeral=True)
+    interaction.response.send_message.assert_called_with(
+        "❌ Invalid queue index. Check the queue for valid numbers.",
+        ephemeral=True,
+    )
 
     # Out of bounds move
     interaction.response.send_message.reset_mock()
     await cog.move.callback(cog, interaction, from_index=1, to_index=10)
-    interaction.response.send_message.assert_called_with("❌ Invalid queue index positions.", ephemeral=True)
+    interaction.response.send_message.assert_called_with(
+        "❌ Invalid queue index positions.", ephemeral=True
+    )
 
 
 @pytest.mark.asyncio
@@ -478,7 +540,9 @@ async def test_player_loop_source_creation_failure_notifies_channel(cog, interac
     with patch("music_cog.YTDLSource.create_source", side_effect=Exception("Extraction Failed")):
         player.bot.is_closed = MagicMock(side_effect=[False, True])
         await player.player_loop()
-        player.channel.send.assert_called_with("❌ Failed to play **Broken Track**: Track unavailable or restricted.")
+        player.channel.send.assert_called_with(
+            "❌ Failed to play **Broken Track**: Track unavailable or restricted."
+        )
 
 
 @pytest.mark.asyncio
@@ -614,7 +678,10 @@ async def test_stop_in_loop_modes_clears_queue_and_sets_manual_stop(cog, interac
 @pytest.mark.asyncio
 async def test_autoplay_fallback_search_when_mix_empty(cog, interaction):
     player = cog.get_player(interaction)
-    player.current = Song({"title": "Bohemian Rhapsody", "webpage_url": "http://yt.com/123"}, interaction.user)
+    player.current = Song(
+        {"title": "Bohemian Rhapsody", "webpage_url": "http://yt.com/123"},
+        interaction.user,
+    )
     player.history = ["http://yt.com/123"]
 
     with patch("music_cog.yt_dlp.YoutubeDL") as mock_ydl:
@@ -623,10 +690,18 @@ async def test_autoplay_fallback_search_when_mix_empty(cog, interaction):
         mock_instance.extract_info.return_value = {"entries": []}
         mock_ydl.return_value.__enter__.return_value = mock_instance
 
-        with patch("music_cog.YTDLSource.extract_info", return_value={"title": "Related Song", "webpage_url": "http://yt.com/fallback"}) as mock_search:
+        with patch(
+            "music_cog.YTDLSource.extract_info",
+            return_value={
+                "title": "Related Song",
+                "webpage_url": "http://yt.com/fallback",
+            },
+        ) as mock_search:
             res = await player.get_related_video("http://yt.com/123")
             assert res == "http://yt.com/fallback"
-            mock_search.assert_called_once_with("ytsearch5:Bohemian Rhapsody audio", loop=cog.bot.loop)
+            mock_search.assert_called_once_with(
+                "ytsearch5:Bohemian Rhapsody audio", loop=cog.bot.loop
+            )
 
 
 @pytest.mark.asyncio
@@ -641,14 +716,16 @@ async def test_dj_restricted_volume_and_autoplay(cog, interaction):
     # Volume restricted
     await cog.volume.callback(cog, interaction, vol=50)
     interaction.response.send_message.assert_called_with(
-        "❌ You need the 'DJ' role or Manage Server permissions to use this command.", ephemeral=True
+        "❌ You need the 'DJ' role or Manage Server permissions to use this command.",
+        ephemeral=True,
     )
 
     interaction.response.send_message.reset_mock()
     # Autoplay restricted
     await cog.autoplay.callback(cog, interaction)
     interaction.response.send_message.assert_called_with(
-        "❌ You need the 'DJ' role or Manage Server permissions to use this command.", ephemeral=True
+        "❌ You need the 'DJ' role or Manage Server permissions to use this command.",
+        ephemeral=True,
     )
 
 
@@ -671,7 +748,9 @@ async def test_resolve_spotify_cleans_metadata(cog):
         mock_session = MagicMock()
         mock_resp = AsyncMock()
         mock_resp.status = 200
-        mock_resp.json = AsyncMock(return_value={"title": "Blinding Lights - song by The Weeknd | Spotify"})
+        mock_resp.json = AsyncMock(
+            return_value={"title": "Blinding Lights - song by The Weeknd | Spotify"}
+        )
         mock_cm = MagicMock()
         mock_cm.__aenter__ = AsyncMock(return_value=mock_resp)
         mock_cm.__aexit__ = AsyncMock(return_value=None)
@@ -717,7 +796,8 @@ async def test_cog_app_command_error_missing_permissions(cog, interaction):
     err = app_commands.MissingPermissions(["manage_guild"])
     await cog.cog_app_command_error(interaction, err)
     interaction.response.send_message.assert_called_with(
-        "❌ You need the following permission(s) to use this command: `manage_guild`", ephemeral=True
+        "❌ You need the following permission(s) to use this command: `manage_guild`",
+        ephemeral=True,
     )
 
 
@@ -729,12 +809,16 @@ async def test_player_loop_voice_client_play_exception_handling(cog, interaction
     await player.queue.put(song)
 
     interaction.guild.voice_client.is_connected = MagicMock(return_value=True)
-    interaction.guild.voice_client.play = MagicMock(side_effect=discord.ClientException("Voice disconnected"))
+    interaction.guild.voice_client.play = MagicMock(
+        side_effect=discord.ClientException("Voice disconnected")
+    )
 
     with patch("music_cog.YTDLSource.create_source", return_value=MagicMock()):
         player.bot.is_closed = MagicMock(side_effect=[False, True])
         await player.player_loop()
-        player.channel.send.assert_called_with("❌ Failed to play **Test Song**: Voice playback error.")
+        player.channel.send.assert_called_with(
+            "❌ Failed to play **Test Song**: Voice playback error."
+        )
         assert player.current is None
 
 
@@ -792,15 +876,23 @@ async def test_song_autocomplete_cache_and_https(cog, interaction):
 @pytest.mark.asyncio
 async def test_user_song_priority_over_autoqueue(cog, interaction):
     player = cog.get_player(interaction)
-    
+
     # Add an autoplay song first
-    auto_song = Song({"title": "Autoplay Song", "webpage_url": "http://auto1"}, cog.bot.user, is_autoplay=True)
+    auto_song = Song(
+        {"title": "Autoplay Song", "webpage_url": "http://auto1"},
+        cog.bot.user,
+        is_autoplay=True,
+    )
     await player.queue.put(auto_song)
-    
+
     # Now user adds a song
-    user_song = Song({"title": "User Song", "webpage_url": "http://user1"}, interaction.user, is_autoplay=False)
+    user_song = Song(
+        {"title": "User Song", "webpage_url": "http://user1"},
+        interaction.user,
+        is_autoplay=False,
+    )
     await player.queue.put(user_song)
-    
+
     items = player.get_queue_items()
     assert len(items) == 2
     # User song must be first in line before autoqueue song
@@ -811,19 +903,35 @@ async def test_user_song_priority_over_autoqueue(cog, interaction):
 @pytest.mark.asyncio
 async def test_multiple_user_songs_fifo_before_autoqueue(cog, interaction):
     player = cog.get_player(interaction)
-    
-    auto_song1 = Song({"title": "Auto 1", "webpage_url": "http://auto1"}, cog.bot.user, is_autoplay=True)
-    auto_song2 = Song({"title": "Auto 2", "webpage_url": "http://auto2"}, cog.bot.user, is_autoplay=True)
+
+    auto_song1 = Song(
+        {"title": "Auto 1", "webpage_url": "http://auto1"},
+        cog.bot.user,
+        is_autoplay=True,
+    )
+    auto_song2 = Song(
+        {"title": "Auto 2", "webpage_url": "http://auto2"},
+        cog.bot.user,
+        is_autoplay=True,
+    )
     await player.queue.put(auto_song1)
     await player.queue.put(auto_song2)
-    
-    user_song1 = Song({"title": "User 1", "webpage_url": "http://u1"}, interaction.user, is_autoplay=False)
-    user_song2 = Song({"title": "User 2", "webpage_url": "http://u2"}, interaction.user, is_autoplay=False)
-    
+
+    user_song1 = Song(
+        {"title": "User 1", "webpage_url": "http://u1"},
+        interaction.user,
+        is_autoplay=False,
+    )
+    user_song2 = Song(
+        {"title": "User 2", "webpage_url": "http://u2"},
+        interaction.user,
+        is_autoplay=False,
+    )
+
     # User 1 adds song, then User 2 adds song
     await player.queue.put(user_song1)
     await player.queue.put(user_song2)
-    
+
     items = player.get_queue_items()
     assert len(items) == 4
     # User songs must maintain FIFO order among themselves and precede autoqueue songs
@@ -836,15 +944,23 @@ async def test_multiple_user_songs_fifo_before_autoqueue(cog, interaction):
 @pytest.mark.asyncio
 async def test_autoplay_playing_not_interrupted_by_user_request(cog, interaction):
     player = cog.get_player(interaction)
-    
+
     # Autoplay song is currently playing
-    auto_playing = Song({"title": "Current Auto", "webpage_url": "http://auto_curr"}, cog.bot.user, is_autoplay=True)
+    auto_playing = Song(
+        {"title": "Current Auto", "webpage_url": "http://auto_curr"},
+        cog.bot.user,
+        is_autoplay=True,
+    )
     player.current = auto_playing
-    
+
     # User requests a song while autoplay is actively playing
-    user_song = Song({"title": "User Request", "webpage_url": "http://user_req"}, interaction.user, is_autoplay=False)
+    user_song = Song(
+        {"title": "User Request", "webpage_url": "http://user_req"},
+        interaction.user,
+        is_autoplay=False,
+    )
     await player.queue.put(user_song)
-    
+
     # Currently playing song remains uninterrupted
     assert player.current == auto_playing
     # Next up in queue is the user's requested song
@@ -855,14 +971,22 @@ async def test_autoplay_playing_not_interrupted_by_user_request(cog, interaction
 async def test_manual_skip_during_autoplay_transitions_to_user_song(cog, interaction):
     player = cog.get_player(interaction)
     player.channel = AsyncMock()
-    
-    auto_playing = Song({"title": "Autoplay Song", "webpage_url": "http://auto"}, cog.bot.user, is_autoplay=True)
-    user_song = Song({"title": "User Song", "webpage_url": "http://user"}, interaction.user, is_autoplay=False)
-    
+
+    auto_playing = Song(
+        {"title": "Autoplay Song", "webpage_url": "http://auto"},
+        cog.bot.user,
+        is_autoplay=True,
+    )
+    user_song = Song(
+        {"title": "User Song", "webpage_url": "http://user"},
+        interaction.user,
+        is_autoplay=False,
+    )
+
     await player.queue.put(user_song)
     player.current = auto_playing
     player.manual_skip = True
-    
+
     # Next song peeked should be user song
     assert player.peek_next() == user_song
 
@@ -870,18 +994,18 @@ async def test_manual_skip_during_autoplay_transitions_to_user_song(cog, interac
 @pytest.mark.asyncio
 async def test_shuffle_preserves_user_priority(cog, interaction):
     player = cog.get_player(interaction)
-    
+
     u1 = Song({"title": "U1", "webpage_url": "http://u1"}, interaction.user, is_autoplay=False)
     u2 = Song({"title": "U2", "webpage_url": "http://u2"}, interaction.user, is_autoplay=False)
     u3 = Song({"title": "U3", "webpage_url": "http://u3"}, interaction.user, is_autoplay=False)
     a1 = Song({"title": "A1", "webpage_url": "http://a1"}, cog.bot.user, is_autoplay=True)
     a2 = Song({"title": "A2", "webpage_url": "http://a2"}, cog.bot.user, is_autoplay=True)
-    
+
     for s in [u1, u2, u3, a1, a2]:
         await player.queue.put(s)
-        
+
     player.shuffle()
-    
+
     items = player.get_queue_items()
     assert len(items) == 5
     # The first 3 items must all be user songs, and the last 2 must be auto songs
@@ -893,15 +1017,19 @@ async def test_shuffle_preserves_user_priority(cog, interaction):
 async def test_loop_queue_respects_user_and_autoplay_priority(cog, interaction):
     player = cog.get_player(interaction)
     player.loop_mode = LoopMode.QUEUE
-    
+
     auto_song = Song({"title": "A1", "webpage_url": "http://a1"}, cog.bot.user, is_autoplay=True)
     await player.queue.put(auto_song)
-    
+
     # Suppose a user song finishes in LoopMode.QUEUE
-    user_curr = Song({"title": "U1", "webpage_url": "http://u1"}, interaction.user, is_autoplay=False)
+    user_curr = Song(
+        {"title": "U1", "webpage_url": "http://u1"},
+        interaction.user,
+        is_autoplay=False,
+    )
     new_song = Song(user_curr.data, user_curr.requester, is_autoplay=user_curr.is_autoplay)
     await player.queue.put(new_song)
-    
+
     items = player.get_queue_items()
     # The re-queued user song should be placed before the autoplay song
     assert items[0] == new_song
@@ -922,18 +1050,38 @@ def test_is_valid_music_entry():
     from music_cog import is_valid_music_entry
 
     # Valid music entries
-    assert is_valid_music_entry({"title": "Adele - Easy On Me (Official Video)", "duration": 215}) is True
-    assert is_valid_music_entry({"title": "Queen - Bohemian Rhapsody (Official Audio)", "duration": 354}) is True
-    assert is_valid_music_entry({"title": "Artist - Track (Lyrics)", "duration": 180}) is True
+    assert is_valid_music_entry(
+        {"title": "Adele - Easy On Me (Official Video)", "duration": 215}
+    ) is True
+    assert is_valid_music_entry(
+        {"title": "Queen - Bohemian Rhapsody (Official Audio)", "duration": 354}
+    ) is True
+    assert is_valid_music_entry(
+        {"title": "Artist - Track (Lyrics)", "duration": 180}
+    ) is True
 
     # Non-music keyword rejections
-    assert is_valid_music_entry({"title": "Reacting to Adele - Easy On Me! (She Cried)", "duration": 600}) is False
-    assert is_valid_music_entry({"title": "Top 10 Best Songs Tier List Review", "duration": 400}) is False
-    assert is_valid_music_entry({"title": "How To Play Piano Tutorial for Beginners", "duration": 500}) is False
-    assert is_valid_music_entry({"title": "Podcast Episode 42: Music Discussion", "duration": 700}) is False
-    assert is_valid_music_entry({"title": "Epic Gameplay Walkthrough Part 1", "duration": 800}) is False
-    assert is_valid_music_entry({"title": "10 Hours Loop of Chill Beats", "duration": 36000}) is False
-    assert is_valid_music_entry({"title": "Behind The Scenes of Music Video", "duration": 300}) is False
+    assert is_valid_music_entry(
+        {"title": "Reacting to Adele - Easy On Me! (She Cried)", "duration": 600}
+    ) is False
+    assert is_valid_music_entry(
+        {"title": "Top 10 Best Songs Tier List Review", "duration": 400}
+    ) is False
+    assert is_valid_music_entry(
+        {"title": "How To Play Piano Tutorial for Beginners", "duration": 500}
+    ) is False
+    assert is_valid_music_entry(
+        {"title": "Podcast Episode 42: Music Discussion", "duration": 700}
+    ) is False
+    assert is_valid_music_entry(
+        {"title": "Epic Gameplay Walkthrough Part 1", "duration": 800}
+    ) is False
+    assert is_valid_music_entry(
+        {"title": "10 Hours Loop of Chill Beats", "duration": 36000}
+    ) is False
+    assert is_valid_music_entry(
+        {"title": "Behind The Scenes of Music Video", "duration": 300}
+    ) is False
 
     # Duration boundary rejections
     assert is_valid_music_entry({"title": "Short Meme Clip", "duration": 30}) is False
@@ -950,7 +1098,10 @@ def test_extract_video_id_and_normalize_title():
     assert extract_video_id("dQw4w9WgXcQ") == "dQw4w9WgXcQ"
     assert extract_video_id(None) is None
 
-    assert normalize_title("Rick Astley - Never Gonna Give You Up (Official Video) [4K]") == "rick astley never gonna give you up"
+    assert (
+        normalize_title("Rick Astley - Never Gonna Give You Up (Official Video) [4K]")
+        == "rick astley never gonna give you up"
+    )
     assert normalize_title("Shakira - Waka Waka (This Time for Africa) [HQ]") == "shakira waka waka"
 
 
@@ -958,18 +1109,36 @@ def test_extract_video_id_and_normalize_title():
 async def test_get_related_video_filters_non_music_and_history(cog, interaction):
     player = cog.get_player(interaction)
     player.history = ["https://www.youtube.com/watch?v=song1111111"]
-    player.current = Song({"title": "Current Seed Song", "webpage_url": "https://www.youtube.com/watch?v=seed1111111"}, interaction.user)
+    player.current = Song(
+        {
+            "title": "Current Seed Song",
+            "webpage_url": "https://www.youtube.com/watch?v=seed1111111",
+        },
+        interaction.user,
+    )
 
-    queued_song = Song({"title": "Queued Song", "webpage_url": "https://www.youtube.com/watch?v=queued11111"}, interaction.user)
+    queued_song = Song(
+        {
+            "title": "Queued Song",
+            "webpage_url": "https://www.youtube.com/watch?v=queued11111",
+        },
+        interaction.user,
+    )
     await player.queue.put(queued_song)
 
     mock_entries = [
-        {"id": "seed1111111", "title": "Current Seed Song", "url": "https://www.youtube.com/watch?v=seed1111111", "duration": 200},
-        {"id": "song1111111", "title": "Already Played Song", "url": "https://www.youtube.com/watch?v=song1111111", "duration": 200},
-        {"id": "queued11111", "title": "Queued Song", "url": "https://www.youtube.com/watch?v=queued11111", "duration": 200},
-        {"id": "reaction111", "title": "Reaction To Seed Song!!", "url": "https://www.youtube.com/watch?v=reaction111", "duration": 400},
-        {"id": "valid_song1", "title": "Valid Music Track 1", "url": "https://www.youtube.com/watch?v=valid_song1", "duration": 210},
-        {"id": "valid_song2", "title": "Valid Music Track 2", "url": "https://www.youtube.com/watch?v=valid_song2", "duration": 195},
+        {"id": "seed1111111", "title": "Current Seed Song",
+         "url": "https://www.youtube.com/watch?v=seed1111111", "duration": 200},
+        {"id": "song1111111", "title": "Already Played Song",
+         "url": "https://www.youtube.com/watch?v=song1111111", "duration": 200},
+        {"id": "queued11111", "title": "Queued Song",
+         "url": "https://www.youtube.com/watch?v=queued11111", "duration": 200},
+        {"id": "reaction111", "title": "Reaction To Seed Song!!",
+         "url": "https://www.youtube.com/watch?v=reaction111", "duration": 400},
+        {"id": "valid_song1", "title": "Valid Music Track 1",
+         "url": "https://www.youtube.com/watch?v=valid_song1", "duration": 210},
+        {"id": "valid_song2", "title": "Valid Music Track 2",
+         "url": "https://www.youtube.com/watch?v=valid_song2", "duration": 195},
     ]
 
     with patch("music_cog.yt_dlp.YoutubeDL") as mock_ydl_class:
@@ -989,7 +1158,10 @@ async def test_get_related_video_filters_non_music_and_history(cog, interaction)
 
 def test_float_duration_song_builds_np_embed(cog, interaction):
     player = cog.get_player(interaction)
-    player.current = Song({"title": "Float Track", "webpage_url": "http://yt.com", "duration": 215.7}, interaction.user)
+    player.current = Song(
+        {"title": "Float Track", "webpage_url": "http://yt.com", "duration": 215.7},
+        interaction.user,
+    )
     player.current_start_time = None
 
     # Must not raise ValueError: Unknown format code 'd' for object of type 'float'
@@ -1012,7 +1184,11 @@ async def test_autoplay_toggle_idle_spawns_prefetch_task(cog, interaction):
     player.autoplay = False
     player.history = ["http://yt.com/previous"]
 
-    with patch.object(cog.bot.loop, "create_task", side_effect=lambda coro: coro.close() or MagicMock()) as mock_ct:
+    with patch.object(
+        cog.bot.loop,
+        "create_task",
+        side_effect=lambda coro: coro.close() or MagicMock(),
+    ) as mock_ct:
         await cog.autoplay.callback(cog, interaction)
         assert player.autoplay is True
         mock_ct.assert_called_once()
@@ -1130,7 +1306,7 @@ def test_silence_primer_prepends_zero_frames_then_passes_through():
 
 @pytest.mark.asyncio
 async def test_create_source_priming_wraps_inside_transformer():
-    from music.audio import YTDLSource, SilencePrimer
+    from music.audio import SilencePrimer, YTDLSource
 
     class DummyFFmpeg(discord.AudioSource):
         def read(self):
@@ -1197,7 +1373,10 @@ def test_is_instant_fail_matrix(cog, interaction):
     # No playback started / no current track -> not a failure
     assert player._is_instant_fail() is False
 
-    player.current = Song({"title": "Long Track", "webpage_url": "http://x", "duration": 200}, interaction.user)
+    player.current = Song(
+        {"title": "Long Track", "webpage_url": "http://x", "duration": 200},
+        interaction.user,
+    )
 
     # Recent start + long known duration -> instant fail
     player.last_play_start = _time.time()
@@ -1209,7 +1388,10 @@ def test_is_instant_fail_matrix(cog, interaction):
 
     # Known ultra-short track that finished fast -> legitimate, not a failure
     player.last_play_start = _time.time()
-    player.current = Song({"title": "Short Clip", "webpage_url": "http://x", "duration": 1}, interaction.user)
+    player.current = Song(
+        {"title": "Short Clip", "webpage_url": "http://x", "duration": 1},
+        interaction.user,
+    )
     assert player._is_instant_fail() is False
 
     # Unknown duration ended instantly -> treated as failure
@@ -1223,7 +1405,10 @@ async def test_instant_fail_bypasses_loop_requeue(cog, interaction, mode):
     player = cog.get_player(interaction)
     player.channel = AsyncMock()
     player.loop_mode = mode
-    song = Song({"title": "Dead Track", "webpage_url": "http://yt.com/dead", "duration": 200}, interaction.user)
+    song = Song(
+        {"title": "Dead Track", "webpage_url": "http://yt.com/dead", "duration": 200},
+        interaction.user,
+    )
     await player.queue.put(song)
 
     interaction.guild.voice_client.is_connected = MagicMock(return_value=True)
@@ -1399,6 +1584,514 @@ def test_should_prime_gating(cog, interaction):
     # Stale activity beyond threshold -> prime
     player.last_active_ts = _time.time() - 5
     assert player._should_prime() is True
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 robustness improvements
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_track_message_schedules_debounced_flush_instead_of_blocking_write(cog):
+    cog._save_orphan_index = MagicMock()
+    msg = MagicMock()
+    msg.channel.id = 1
+    msg.id = 2
+
+    cog.track_message(12345, msg)
+
+    cog._save_orphan_index.assert_not_called()
+    assert cog._orphan_save_task is not None
+
+
+@pytest.mark.asyncio
+async def test_flush_orphan_index_now_writes_file_via_executor(cog, tmp_path):
+    orphan_file = tmp_path / "orphans.json"
+    cog.orphan_index_file = str(orphan_file)
+
+    msg = MagicMock()
+    msg.channel.id = 5
+    msg.id = 6
+    cog.track_message(99, msg)
+    await cog.flush_orphan_index_now()
+
+    data = json.loads(orphan_file.read_text())
+    assert {"channel_id": 5, "message_id": 6} in data["99"]
+    assert cog._orphan_dirty is False
+
+
+@pytest.mark.asyncio
+async def test_flush_orphan_index_now_skips_write_when_not_dirty(cog):
+    cog._write_orphan_payload = MagicMock()
+    cog._orphan_save_task = MagicMock()
+    cog._orphan_dirty = False
+
+    await cog.flush_orphan_index_now()
+
+    cog._write_orphan_payload.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_seek_reuses_fresh_cached_stream_url(cog, interaction):
+    player = cog.get_player(interaction)
+    player.channel = AsyncMock()
+    song = Song(
+        {"title": "T", "webpage_url": "http://yt.com/x", "url": "http://stream/x",
+         "duration": 200},
+        interaction.user,
+    )
+    player.current = song
+    player.is_seeking = True
+    player.seek_position = 45
+    interaction.guild.voice_client.is_connected = MagicMock(return_value=True)
+    interaction.guild.voice_client.play = MagicMock(
+        side_effect=lambda source, after=None: player.next.set()
+    )
+
+    with patch(
+        "music_cog.YTDLSource.create_source", return_value=MagicMock()
+    ) as mock_create:
+        player.bot.is_closed = MagicMock(side_effect=[False, True])
+        await player.player_loop()
+
+    args, kwargs = mock_create.call_args
+    assert args[0] is song.data
+    assert kwargs.get("seek") == 45
+
+
+@pytest.mark.asyncio
+async def test_stale_stream_url_still_reextracts_on_seek(cog, interaction):
+    import time as _time
+
+    player = cog.get_player(interaction)
+    player.channel = AsyncMock()
+    song = Song(
+        {"title": "T", "webpage_url": "http://yt.com/x", "url": "http://stream/x",
+         "duration": 200},
+        interaction.user,
+    )
+    song.extracted_at = _time.time() - 7200
+    player.current = song
+    player.is_seeking = True
+    player.seek_position = 10
+    interaction.guild.voice_client.is_connected = MagicMock(return_value=True)
+    interaction.guild.voice_client.play = MagicMock(
+        side_effect=lambda source, after=None: player.next.set()
+    )
+
+    with patch(
+        "music_cog.YTDLSource.create_source", return_value=MagicMock()
+    ) as mock_create:
+        player.bot.is_closed = MagicMock(side_effect=[False, True])
+        await player.player_loop()
+
+    args, _ = mock_create.call_args
+    assert args[0] == song.url
+
+
+@pytest.mark.asyncio
+async def test_pause_freezes_elapsed_time(cog, interaction):
+    import time as _time
+
+    player = cog.get_player(interaction)
+    player.current_start_time = _time.time() - 100
+    assert player.get_elapsed_seconds() >= 99
+
+    player.mark_paused()
+    frozen = player.get_elapsed_seconds()
+    await asyncio.sleep(0.05)
+    assert player.get_elapsed_seconds() == frozen
+
+    player.mark_resumed()
+    assert player.paused_at is None
+    assert player.total_paused > 0
+
+
+@pytest.mark.asyncio
+async def test_np_embed_reflects_frozen_progress_while_paused(cog, interaction):
+    import time as _time
+
+    player = cog.get_player(interaction)
+    player.current = Song({"title": "T", "webpage_url": "http://x"}, interaction.user)
+    player.duration = 300
+    player.current_start_time = _time.time() - 60
+    embed_before = player.build_np_embed().description
+
+    player.mark_paused()
+    embed_after = player.build_np_embed().description
+    assert embed_before == embed_after
+
+
+@pytest.mark.asyncio
+async def test_queue_command_does_not_spawn_idle_player(cog, interaction):
+    await cog.queue.callback(cog, interaction)
+
+    assert len(cog.players) == 0
+    interaction.response.send_message.assert_called_with(
+        "The queue is empty.", ephemeral=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_settings_command_reads_store_without_creating_player(
+    cog, interaction
+):
+    cog.settings[str(interaction.guild.id)] = {"volume": 0.3, "autoplay": True}
+
+    await cog.settings_cmd.callback(cog, interaction)
+
+    assert len(cog.players) == 0
+    kwargs = interaction.response.send_message.call_args.kwargs
+    fields = {f.name: f.value for f in kwargs["embed"].fields}
+    assert fields["Volume"] == "`30%`"
+    assert fields["Autoplay"] == "`Enabled`"
+    assert fields["Loop Mode"] == "`Off`"
+
+
+@pytest.mark.asyncio
+async def test_process_playlist_reports_truncation_over_limit(cog, interaction):
+    player = cog.get_player(interaction)
+    entries = [{"title": f"Track {i}", "id": f"id{i}"} for i in range(105)]
+
+    with patch("music_cog.yt_dlp.YoutubeDL") as mock_ytdl_class:
+        mock_instance = MagicMock()
+        mock_instance.extract_info.return_value = {"entries": entries}
+        mock_ytdl_class.return_value.__enter__.return_value = mock_instance
+
+        await cog.process_playlist(interaction, "http://youtube.com/playlist?list=x", player)
+
+    text = interaction.followup.send.call_args.args[0]
+    assert "**100** of **105**" in text
+    assert player.queue.qsize() == 100
+
+
+@pytest.mark.asyncio
+async def test_spawn_background_retains_task_and_logs_failure(cog, caplog):
+    import logging
+
+    cog.bot.loop = asyncio.get_running_loop()
+
+    async def boom():
+        raise RuntimeError("kaboom")
+
+    task = cog.spawn_background(boom())
+    assert task in cog._background_tasks
+
+    with caplog.at_level(logging.ERROR, logger="music.cog"):
+        with pytest.raises(RuntimeError, match="kaboom"):
+            await task
+
+    assert task not in cog._background_tasks
+    assert "Background task failed" in caplog.text
+    assert "kaboom" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_spawn_background_discards_cancelled_task_quietly(cog):
+    cog.bot.loop = asyncio.get_running_loop()
+
+    async def hang():
+        await asyncio.sleep(60)
+
+    task = cog.spawn_background(hang())
+    assert task in cog._background_tasks
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    assert task not in cog._background_tasks
+
+
+@pytest.mark.asyncio
+async def test_cleanup_pops_player_from_registry_before_disconnect(cog, interaction):
+    cog.get_player(interaction)
+
+    async def spy_disconnect(*args, **kwargs):
+        # Player must already be unregistered while we disconnect
+        assert interaction.guild.id not in cog.players
+
+    interaction.guild.voice_client.disconnect = spy_disconnect
+
+    await cog.cleanup(interaction.guild)
+
+    assert interaction.guild.id not in cog.players
+    assert interaction.guild.id not in cog.voice_connect_locks
+
+
+@pytest.mark.asyncio
+async def test_cleanup_without_registered_player_still_disconnects(cog, interaction):
+    await cog.cleanup(interaction.guild)
+    interaction.guild.voice_client.disconnect.assert_awaited_once()
+
+
+def test_song_data_pruned_to_consumed_keys(interaction):
+    bulky = {
+        "title": "T",
+        "webpage_url": "http://x",
+        "id": "abc",
+        "duration": 120,
+        "uploader": "Artist",
+        "formats": [{"x": 1}] * 500,
+        "thumbnails": [{"url": "t"}],
+        "automatic_captions": {"en": []},
+        "http_headers": {"User-Agent": "UA"},
+    }
+    song = Song(bulky, interaction.user)
+
+    assert "formats" not in song.data
+    assert "thumbnails" not in song.data
+    assert "automatic_captions" not in song.data
+    assert song.data["id"] == "abc"
+    assert song.data["http_headers"]["User-Agent"] == "UA"
+    assert song.title == "T"
+    assert song.uploader == "Artist"
+
+
+@pytest.mark.asyncio
+async def test_shared_session_carries_default_timeout(cog):
+    session = await cog.get_session()
+    try:
+        assert session.timeout.total == 10
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_resolve_spotify_uses_tight_request_timeout():
+    from music.services.spotify import resolve_spotify
+
+    resp = AsyncMock()
+    resp.status = 200
+    resp.json = AsyncMock(return_value={"title": "Just Song"})
+
+    class Ctx:
+        async def __aenter__(self):
+            return resp
+
+        async def __aexit__(self, *exc):
+            return False
+
+    session = MagicMock()
+    session.get = MagicMock(return_value=Ctx())
+
+    result = await resolve_spotify(session, "https://open.spotify.com/track/xyz")
+
+    assert result == "ytsearch:Just Song"
+    timeout = session.get.call_args.kwargs["timeout"]
+    assert timeout.total == 5
+
+
+@pytest.mark.asyncio
+async def test_cog_unload_runs_shutdown_cleanup_before_closing_session(cog):
+    calls = []
+    cog.shutdown_cleanup = AsyncMock(side_effect=lambda: calls.append("shutdown"))
+
+    session = AsyncMock()
+    session.closed = False
+
+    async def close():
+        calls.append("close")
+
+    session.close = close
+    cog.session = session
+    cog.empty_channel_sweep = MagicMock()
+
+    await cog.cog_unload()
+
+    assert calls == ["shutdown", "close"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: vote skip
+# ---------------------------------------------------------------------------
+
+
+def _make_non_dj(user):
+    user.bot = False
+    user.id = 555
+    user.roles = []
+    perms = MagicMock()
+    perms.manage_guild = False
+    perms.administrator = False
+    user.guild_permissions = perms
+    return user
+
+
+def test_required_skip_votes_majority_math(cog, interaction):
+    player = cog.get_player(interaction)
+    vc_channel = interaction.guild.voice_client.channel
+
+    vc_channel.members = [MagicMock(bot=False)]
+    assert player.required_skip_votes() == 1
+
+    vc_channel.members = [MagicMock(bot=False), MagicMock(bot=True)]
+    assert player.required_skip_votes() == 1
+
+    vc_channel.members = [MagicMock(bot=False), MagicMock(bot=False)]
+    assert player.required_skip_votes() == 2
+
+    vc_channel.members = [MagicMock(bot=False) for _ in range(5)]
+    assert player.required_skip_votes() == 3
+
+    interaction.guild.voice_client = None
+    assert player.required_skip_votes() == 1
+
+
+@pytest.mark.asyncio
+async def test_non_dj_alone_with_bot_can_skip_directly(cog, interaction):
+    player = cog.get_player(interaction)
+    requester = MagicMock()
+    requester.id = 999
+    player.current = Song({"title": "T", "webpage_url": "http://x"}, requester)
+
+    _make_non_dj(interaction.user)
+    vc = interaction.guild.voice_client
+    vc.channel.members = [interaction.user]
+    vc.is_playing = MagicMock(return_value=True)
+    vc.stop = MagicMock()
+
+    await cog.skip.callback(cog, interaction)
+
+    assert player.manual_skip is True
+    assert player.skip_votes == set()
+    vc.stop.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_vote_skip_accumulates_until_majority(cog, interaction):
+    player = cog.get_player(interaction)
+    requester = MagicMock()
+    requester.id = 999
+    player.current = Song({"title": "T", "webpage_url": "http://x"}, requester)
+
+    _make_non_dj(interaction.user)
+    listener_b = MagicMock(bot=False)
+    listener_b.id = 2
+    vc = interaction.guild.voice_client
+    vc.channel.members = [interaction.user, listener_b]
+    vc.is_playing = MagicMock(return_value=True)
+    vc.stop = MagicMock()
+
+    # First vote: below majority (1/2)
+    await cog.handle_skip_request(interaction)
+    assert player.manual_skip is False
+    vc.stop.assert_not_called()
+    msg = interaction.response.send_message.call_args.args[0]
+    assert "1/2" in msg
+    assert "Skip vote registered" in msg
+
+    # Second vote: reaches majority -> skip fires
+    interaction.response.send_message.reset_mock()
+    interaction.user.id = 2
+    await cog.handle_skip_request(interaction)
+    assert player.manual_skip is True
+    vc.stop.assert_called_once()
+    assert player.skip_votes == set()
+
+
+@pytest.mark.asyncio
+async def test_requester_skips_own_track_without_votes(cog, interaction):
+    player = cog.get_player(interaction)
+    _make_non_dj(interaction.user)
+    other_listener = MagicMock(bot=False)
+    other_listener.id = 42
+    vc = interaction.guild.voice_client
+    vc.channel.members = [interaction.user, other_listener]
+    vc.is_playing = MagicMock(return_value=True)
+    vc.stop = MagicMock()
+
+    player.current = Song({"title": "T", "webpage_url": "http://x"}, interaction.user)
+
+    await cog.handle_skip_request(interaction)
+
+    assert player.manual_skip is True
+    vc.stop.assert_called_once()
+    text = interaction.response.send_message.call_args.args[0]
+    assert "requested this track" in text
+
+
+@pytest.mark.asyncio
+async def test_duplicate_vote_is_rejected_without_stopping(cog, interaction):
+    player = cog.get_player(interaction)
+    requester = MagicMock()
+    requester.id = 999
+    player.current = Song({"title": "T", "webpage_url": "http://x"}, requester)
+
+    _make_non_dj(interaction.user)
+    listener_b = MagicMock(bot=False)
+    listener_b.id = 2
+    vc = interaction.guild.voice_client
+    vc.channel.members = [interaction.user, listener_b]
+    vc.is_playing = MagicMock(return_value=True)
+    vc.stop = MagicMock()
+
+    await cog.handle_skip_request(interaction)
+    interaction.response.send_message.reset_mock()
+    await cog.handle_skip_request(interaction)
+
+    vc.stop.assert_not_called()
+    assert player.manual_skip is False
+    msg = interaction.response.send_message.call_args.args[0]
+    assert "already voted" in msg
+    assert len(player.skip_votes) == 1
+
+
+@pytest.mark.asyncio
+async def test_new_track_start_resets_skip_votes(cog, interaction):
+    player = cog.get_player(interaction)
+    player.channel = AsyncMock()
+    song = Song(
+        {"title": "T", "webpage_url": "http://yt.com/x", "url": "http://stream/x",
+         "duration": 200},
+        interaction.user,
+    )
+    player.skip_votes.update([1, 2, 3])
+    await player.queue.put(song)
+
+    interaction.guild.voice_client.is_connected = MagicMock(return_value=True)
+    interaction.guild.voice_client.play = MagicMock(
+        side_effect=lambda source, after=None: player.next.set()
+    )
+
+    with patch("music_cog.YTDLSource.create_source", return_value=MagicMock()):
+        player.bot.is_closed = MagicMock(side_effect=[False, True])
+        await player.player_loop()
+
+    assert player.skip_votes == set()
+
+
+@pytest.mark.asyncio
+async def test_player_view_skip_button_delegates_to_shared_handler(
+    cog, interaction
+):
+    from music_cog import PlayerView
+
+    player = cog.get_player(interaction)
+    view = PlayerView(cog, player)
+
+    with patch.object(cog, "handle_skip_request", new=AsyncMock()) as handler:
+        await view.skip.callback(interaction)
+
+    handler.assert_awaited_once_with(interaction)
+
+
+@pytest.mark.asyncio
+async def test_dj_vote_clears_existing_votes_on_instant_skip(cog, interaction):
+    player = cog.get_player(interaction)
+    player.current = Song({"title": "T", "webpage_url": "http://x"}, MagicMock())
+    player.skip_votes.update([1, 2])
+
+    vc = interaction.guild.voice_client
+    vc.is_playing = MagicMock(return_value=True)
+    vc.stop = MagicMock()
+
+    # Fixture user passes the DJ gate by default (truthy guild_permissions)
+    await cog.handle_skip_request(interaction)
+
+    assert player.manual_skip is True
+    assert player.skip_votes == set()
+    vc.stop.assert_called_once()
 
 
 

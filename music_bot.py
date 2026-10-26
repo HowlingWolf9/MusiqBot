@@ -2,14 +2,13 @@ import asyncio
 import contextlib
 import fcntl
 import logging
+import os
 import signal
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
-
-import os
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,7 +26,10 @@ class AutocompleteErrorFilter(logging.Filter):
                 code = getattr(exc_val, "code", None)
                 if isinstance(exc_val, discord.NotFound) or code in (10062, 40060):
                     return False
-                if isinstance(exc_val, discord.HTTPException) and code in (10062, 40060):
+                if isinstance(exc_val, discord.HTTPException) and code in (
+                    10062,
+                    40060,
+                ):
                     return False
         return True
 
@@ -37,9 +39,12 @@ logging.getLogger("discord.app_commands.tree").addFilter(AutocompleteErrorFilter
 
 class CustomCommandTree(app_commands.CommandTree):
     async def on_error(
-        self, interaction: discord.Interaction, error: app_commands.AppCommandError
+        self,
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
     ) -> None:
-        # Silently suppress 404 Unknown Interaction errors caused by rapid typing & expired autocomplete tokens
+        # Silently suppress 404 Unknown Interaction errors caused by rapid
+        # typing & expired autocomplete tokens
         if isinstance(error, discord.NotFound) or getattr(error, "code", None) == 10062:
             return
         if isinstance(error, app_commands.CommandInvokeError) and (
@@ -72,7 +77,6 @@ async def on_ready():
     print("------")
 
 
-
 @bot.command(name="sync")
 @commands.is_owner()
 async def sync(ctx):
@@ -96,9 +100,17 @@ if __name__ == "__main__":
         logging.getLogger(__name__).error(
             "Another MusiqBot instance is already running — exiting."
         )
-        raise SystemExit(1)
+        raise SystemExit(1) from None
+
+    _shutting_down = False
 
     async def _on_signal():
+        # systemd's control-group kill mode delivers SIGTERM to watchmedo AND
+        # the bot process, so this handler can fire multiple times — run once.
+        global _shutting_down
+        if _shutting_down:
+            return
+        _shutting_down = True
         # Release the single-instance guard FIRST so watchmedo's replacement
         # can start immediately while this process finishes its own teardown.
         with contextlib.suppress(Exception):
@@ -115,12 +127,18 @@ if __name__ == "__main__":
 
     async def runner():
         loop = asyncio.get_running_loop()
+        _signal_tasks = set()
+
+        def _spawn_signal_handler():
+            # Retain a reference so the task can't be GC'd mid-teardown
+            t = asyncio.create_task(_on_signal())
+            _signal_tasks.add(t)
+            t.add_done_callback(_signal_tasks.discard)
+
         for sig in (signal.SIGTERM, signal.SIGINT):
             # NotImplementedError on non-Unix loops; fall back to defaults there
             with contextlib.suppress(NotImplementedError):
-                loop.add_signal_handler(
-                    sig, lambda: asyncio.create_task(_on_signal())
-                )
+                loop.add_signal_handler(sig, _spawn_signal_handler)
         await bot.start(os.getenv("DISCORD_TOKEN"))
 
     asyncio.run(runner())

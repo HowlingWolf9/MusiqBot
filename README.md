@@ -39,6 +39,9 @@ commands. Full instructions: [Setup & Deployment](docs/setup.md).
   (⏯️ ⏭️ ⏹️ 🔁 🔀), ephemeral dropdown `/search`, paginated queue browser.
 - **Rich playback control** — seek/replay, volume persistence, three loop
   modes, Spotify link resolution, playlist ingestion (up to 100 tracks).
+- **Vote skip** — DJs skip instantly; everyone else in the voice channel
+  votes, and the track skips at a simple majority (requesters always control
+  their own picks).
 - **Security & permissions** — disruptive commands restricted by a DJ check:
   *Manage Server*/*Administrator*, a role named **DJ**, or a custom role set
   via `/setdjrole`.

@@ -3,6 +3,7 @@ import logging
 import random
 import re
 import time
+
 import discord
 import yt_dlp
 
@@ -142,6 +143,9 @@ class MusicPlayer:
         self.current_start_time = None
         self.last_active_ts = 0.0
         self.last_play_start = None
+        # Pause accounting so elapsed time / progress bar freeze while paused
+        self.paused_at = None
+        self.total_paused = 0.0
         self.volume = 0.5
         self.autoplay = False
         self.loop_mode = LoopMode.OFF
@@ -152,6 +156,8 @@ class MusicPlayer:
         self.is_seeking = False
         self.manual_skip = False
         self.manual_stop = False
+        # Vote skip: user IDs that voted to skip the current track
+        self.skip_votes = set()
         self.np_msg = None
         self.queue_msg = None
 
@@ -160,6 +166,40 @@ class MusicPlayer:
     @property
     def is_busy(self) -> bool:
         return self.current is not None or not self.queue.empty() or self.is_loading
+
+    def mark_paused(self):
+        """Record a pause so elapsed time doesn't keep advancing (UI/seek)."""
+        if self.current_start_time and self.paused_at is None:
+            self.paused_at = time.time()
+
+    def mark_resumed(self):
+        if self.paused_at is not None:
+            self.total_paused += time.time() - self.paused_at
+            self.paused_at = None
+
+    def get_elapsed_seconds(self) -> int:
+        if not self.current_start_time:
+            return 0
+        now = self.paused_at if self.paused_at is not None else time.time()
+        return max(0, int(now - self.current_start_time - self.total_paused))
+
+    def humans_in_channel(self) -> int:
+        """Non-bot members currently sharing the bot's voice channel."""
+        vc = getattr(self.guild, "voice_client", None)
+        channel = getattr(vc, "channel", None) if vc else None
+        if not channel:
+            return 0
+        return sum(
+            1 for m in getattr(channel, "members", []) if not getattr(m, "bot", False)
+        )
+
+    def required_skip_votes(self) -> int:
+        """Simple majority of humans in the voice channel (>= 1)."""
+        humans = self.humans_in_channel()
+        return humans // 2 + 1 if humans else 1
+
+    def reset_skip_votes(self):
+        self.skip_votes.clear()
 
     def _should_prime(self) -> bool:
         return (time.time() - self.last_active_ts) > PRIME_IDLE_SECONDS
@@ -203,7 +243,7 @@ class MusicPlayer:
             item = self.queue._queue[index]
             del self.queue._queue[index]
             if item.added_msg:
-                asyncio.create_task(delete_message_safe(item.added_msg))
+                self.cog.spawn_background(delete_message_safe(item.added_msg))
             return item
         raise IndexError("Queue index out of range")
 
@@ -222,7 +262,7 @@ class MusicPlayer:
             try:
                 item = self.queue.get_nowait()
                 if item.added_msg:
-                    asyncio.create_task(delete_message_safe(item.added_msg))
+                    self.cog.spawn_background(delete_message_safe(item.added_msg))
             except Exception:
                 pass
 
@@ -413,11 +453,7 @@ class MusicPlayer:
                 color=discord.Color.red(),
             )
 
-        elapsed = (
-            int(time.time() - self.current_start_time)
-            if self.current_start_time
-            else 0
-        )
+        elapsed = self.get_elapsed_seconds()
         duration = self.current.duration or 0
 
         mins_el, secs_el = divmod(elapsed, 60)
@@ -476,7 +512,7 @@ class MusicPlayer:
                 )
                 if self.autoplay and self.history and not has_auto_song:
                     if not self._prefetching:
-                        self.bot.loop.create_task(self.prefetch_autoplay())
+                        self.cog.spawn_background(self.prefetch_autoplay())
 
                 try:
                     # Wait 5 minutes for the next song before disconnecting
@@ -489,13 +525,14 @@ class MusicPlayer:
                     self.queue_msg = None
                     return self.destroy(self.guild)
 
-            # Re-fetch stream URL if older than 1 hour or seeking
+            # Reuse the cached stream URL while it's fresh (< 1 hour), seek or
+            # not — create_source applies -ss to provided data directly, so
+            # re-extracting over the network for seeks is pure latency.
             self.is_loading = True
             try:
                 prime_frames = PRIMER_FRAMES if self._should_prime() else 0
                 if (
-                    seek is None
-                    and hasattr(song, "extracted_at")
+                    hasattr(song, "extracted_at")
                     and time.time() - song.extracted_at < 3600
                     and song.data.get("url")
                 ):
@@ -526,6 +563,9 @@ class MusicPlayer:
 
             self.current = song
             self.current_start_time = time.time() - (seek or 0)
+            self.paused_at = None
+            self.total_paused = 0.0
+            self.skip_votes.clear()
             if song.url and song.url not in self.history:
                 self.history.append(song.url)
             if len(self.history) > 100:
@@ -587,7 +627,7 @@ class MusicPlayer:
                 getattr(s, "is_autoplay", False) for s in self.queue._queue
             )
             if self.autoplay and self.history and not has_auto_song:
-                self.bot.loop.create_task(self.prefetch_autoplay())
+                self.cog.spawn_background(self.prefetch_autoplay())
 
             await self.next.wait()
             self.last_active_ts = time.time()
@@ -653,4 +693,4 @@ class MusicPlayer:
             self.current_start_time = None
 
     def destroy(self, guild):
-        return self.bot.loop.create_task(self.cog.cleanup(guild))
+        return self.cog.spawn_background(self.cog.cleanup(guild))

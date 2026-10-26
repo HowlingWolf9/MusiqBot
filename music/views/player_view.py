@@ -1,4 +1,5 @@
 import discord
+
 from music.models import LoopMode
 from music.permissions import check_dj_permission
 
@@ -55,11 +56,13 @@ class PlayerView(discord.ui.View):
             )
         if vc.is_playing():
             vc.pause()
+            self.player.mark_paused()
             await interaction.response.send_message(
                 "⏸️ Paused the music."
             )
         elif vc.is_paused():
             vc.resume()
+            self.player.mark_resumed()
             await interaction.response.send_message(
                 "▶️ Resumed the music."
             )
@@ -70,20 +73,9 @@ class PlayerView(discord.ui.View):
 
     @discord.ui.button(style=discord.ButtonStyle.secondary, emoji="⏭️")
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await check_dj_permission(
-            interaction,
-            "❌ You need the 'DJ' role or Manage Server permissions to do this.",
-        ):
-            return
-        vc = interaction.guild.voice_client
-        if vc and (vc.is_playing() or vc.is_paused()):
-            self.player.manual_skip = True
-            vc.stop()
-            await interaction.response.send_message(
-                "⏭️ Skipped the song."
-            )
-        else:
-            await interaction.response.send_message("Nothing to skip.", ephemeral=True)
+        # DJs skip instantly; other listeners in the same voice channel
+        # register a vote (shared logic with the /skip command).
+        await self.cog.handle_skip_request(interaction)
 
     @discord.ui.button(style=discord.ButtonStyle.danger, emoji="⏹️")
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):

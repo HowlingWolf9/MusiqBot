@@ -1,0 +1,21 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["venv", "__pycache__", ".pytest_cache"]
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # import sorting
+    "B",     # flake8-bugbear
+    "ASYNC", # async pitfalls (blocking calls in async functions)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["music", "music_cog", "music_bot"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+testpaths = ["."]

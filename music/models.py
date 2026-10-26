@@ -10,9 +10,32 @@ class LoopMode(Enum):
     QUEUE = "queue"
 
 
+# yt-dlp info dicts carry formats[], thumbnails[], captions, ... that Song
+# never reads. Keeping only consumed keys stops single-track adds from
+# retaining megabyte-scale payloads for the song's whole lifetime.
+_SONG_DATA_KEYS = (
+    "id",
+    "title",
+    "url",
+    "webpage_url",
+    "duration",
+    "thumbnail",
+    "uploader",
+    "channel",
+    "artist",
+    # create_source() reuses the stream URL + negotiated User-Agent without a
+    # second network round-trip while the metadata is fresh.
+    "http_headers",
+)
+
+
 class Song:
     def __init__(self, data, requester, is_autoplay: bool = False):
-        self.data = data
+        self.data = (
+            {k: data[k] for k in _SONG_DATA_KEYS if k in data}
+            if isinstance(data, dict)
+            else {}
+        )
         self.requester = requester
         self.is_autoplay = bool(is_autoplay)
         self.title = data.get("title") or "Unknown Track"

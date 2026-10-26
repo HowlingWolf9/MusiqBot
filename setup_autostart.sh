@@ -15,15 +15,41 @@ WorkingDirectory=/home/wolf/Projects/MusiqBot
 ExecStart=/home/wolf/Projects/MusiqBot/run_dev.sh
 Restart=on-failure
 RestartSec=5s
+# Graceful teardown budget in music_bot.py is 15s; give it room before SIGKILL
+TimeoutStopSec=30s
 
 [Install]
 WantedBy=default.target
+EOF
+
+# Create the yt-dlp auto-update service + timer (runs update_ytdlp.sh daily;
+# restarts the bot only when the version actually changed)
+cat << 'EOF' > ~/.config/systemd/user/musiqbot-ytdlp-update.service
+[Unit]
+Description=MusiqBot yt-dlp auto-update
+
+[Service]
+Type=oneshot
+ExecStart=/home/wolf/Projects/MusiqBot/update_ytdlp.sh
+EOF
+
+cat << 'EOF' > ~/.config/systemd/user/musiqbot-ytdlp-update.timer
+[Unit]
+Description=Daily yt-dlp update for MusiqBot
+
+[Timer]
+OnCalendar=*-*-* 06:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
 EOF
 
 # Reload systemd, enable and start the service
 systemctl --user daemon-reload
 systemctl --user enable musiqbot.service
 systemctl --user start musiqbot.service
+systemctl --user enable --now musiqbot-ytdlp-update.timer
 
 # Enable lingering so the service stays running even when the user logs out
 loginctl enable-linger $USER
@@ -31,3 +57,4 @@ loginctl enable-linger $USER
 echo "Autostart configured successfully! The bot is now running in the background."
 echo "You can check its status anytime with: systemctl --user status musiqbot.service"
 echo "To view logs, use: journalctl --user -u musiqbot.service -f"
+echo "yt-dlp updates run daily at 06:00: systemctl --user list-timers musiqbot-ytdlp-update.timer"

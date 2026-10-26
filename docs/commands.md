@@ -46,10 +46,22 @@ one live player UI per guild. Acknowledged ephemerally.
 |---|---|
 | `/pause` | Pauses playback |
 | `/resume` | Resumes paused playback |
-| `/skip` | Stops the current source; the loop advances to the next track. In Queue loop mode, the skipped track is re-appended |
+| `/skip` | DJ: skips instantly. Non-DJ in the bot's voice channel: registers a **skip vote** (see below) |
 | `/stop` | Clears queue **and** history, stops playback. Player idles out after 5 min |
 | `/seek timestamp` | Jumps within the current track. Accepts `90`, `1:30`, or `1:05:30` |
 | `/replay` | Restarts the current track from 0:00 |
+
+### Vote skip
+
+Listeners without DJ privileges can still get rid of the current track:
+
+- Each non-DJ in the bot's voice channel contributes one vote via `/skip`
+  or the ⏭️ button (duplicate votes are ignored, feedback is ephemeral).
+- The track skips as soon as votes reach a **simple majority of humans**
+  in the voice channel; a lone listener with the bot skips immediately.
+- The current track's requester can always skip their own pick without
+  votes.
+- Votes reset every time a new track starts.
 
 Seeking works by stopping the voice client with a pending seek position; the
 player loop re-resolves the stream with an FFmpeg `-ss` offset and keeps the
@@ -100,19 +112,20 @@ Loop mode and autoplay are also reachable from the Now Playing embed buttons
 
 ## Now Playing Embed Buttons
 
-The persistent player UI exposes five buttons. All require DJ privileges and
-require you to be in the bot's voice channel:
+The persistent player UI exposes five buttons. You must be in the bot's voice
+channel to use them. All require DJ privileges **except ⏭️**, which lets
+non-DJs register a skip vote (identical to `/skip`):
 
 | Button | Action |
 |---|---|
 | ⏯️ | Pause ↔ Resume |
-| ⏭️ | Skip |
+| ⏭️ | Skip (DJ) / vote to skip (everyone else in the voice channel) |
 | ⏹️ | Stop & clear queue/history |
 | 🔁 | Cycle loop mode Off → Track → Queue (button label/color reflects state) |
 | 🔀 | Shuffle queue |
 
-Anyone may *view* the embed, but pressing a button without DJ privileges gets
-an ephemeral rejection.
+Anyone may *view* the embed, but pressing a DJ-only button without DJ
+privileges gets an ephemeral rejection.
 
 ## Permissions
 

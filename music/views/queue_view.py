@@ -48,11 +48,19 @@ class QueueView(discord.ui.View):
         if not items:
             embed.description = "The queue is currently empty."
         else:
-            fmt = "\n".join(
-                f"`{start + i + 1}.` **[{song.title}]({song.url})** | `{song.requester.display_name}{' (Autoplay)' if getattr(song, 'is_autoplay', False) else ''}`"
-                for i, song in enumerate(page_items)
+
+            def fmt_row(i, song):
+                autoplay = (
+                    " (Autoplay)" if getattr(song, "is_autoplay", False) else ""
+                )
+                return (
+                    f"`{start + i + 1}.` **[{song.title}]({song.url})** | "
+                    f"`{song.requester.display_name}{autoplay}`"
+                )
+
+            embed.description = "**Up Next:**\n" + "\n".join(
+                fmt_row(i, song) for i, song in enumerate(page_items)
             )
-            embed.description = f"**Up Next:**\n{fmt}"
 
         total_duration = sum(s.duration for s in items if s.duration)
         mins, secs = divmod(total_duration, 60)
@@ -61,7 +69,10 @@ class QueueView(discord.ui.View):
 
         loop_str = self.player.loop_mode.value.capitalize()
         embed.set_footer(
-            text=f"Page {self.current_page + 1} of {max_pages} | {len(items)} tracks | Queue Duration: {dur_str} | Loop: {loop_str}"
+            text=(
+                f"Page {self.current_page + 1} of {max_pages} | {len(items)} tracks | "
+                f"Queue Duration: {dur_str} | Loop: {loop_str}"
+            )
         )
         return embed
 

@@ -90,6 +90,8 @@ WorkingDirectory=/home/wolf/Projects/MusiqBot
 ExecStart=/home/wolf/Projects/MusiqBot/run_dev.sh
 Restart=on-failure
 RestartSec=5s
+# Graceful teardown budget in music_bot.py is 15s; give it room before SIGKILL
+TimeoutStopSec=30s
 
 [Install]
 WantedBy=default.target
@@ -97,6 +99,23 @@ WantedBy=default.target
 
 …then enables + starts it and runs `loginctl enable-linger` so the bot keeps
 running after you log out.
+
+### Automatic yt-dlp updates
+
+YouTube changes break outdated extractors constantly, so `setup_autostart.sh`
+also installs a `musiqbot-ytdlp-update.timer` that runs `update_ytdlp.sh`
+daily at 06:00. It upgrades yt-dlp in the venv, syncs the
+`requirements.txt` pin, and restarts the bot **only if the version actually
+changed** (a restart is required because the running process keeps the old
+module loaded).
+
+Useful commands:
+
+```bash
+systemctl --user list-timers musiqbot-ytdlp-update.timer   # next run
+journalctl --user -u musiqbot-ytdlp-update.service         # update history
+systemctl --user start musiqbot-ytdlp-update.service       # force an update now
+```
 
 Useful commands:
 

@@ -1,12 +1,16 @@
 import re
 import urllib.parse
+
 import aiohttp
 
 
 async def resolve_spotify(session: aiohttp.ClientSession, url: str) -> str | None:
     try:
         oembed_url = f"https://open.spotify.com/oembed?url={urllib.parse.quote(url)}"
-        async with session.get(oembed_url) as resp:
+        # Tight budget: a hung oEmbed request must not stall /play for minutes
+        async with session.get(
+            oembed_url, timeout=aiohttp.ClientTimeout(total=5)
+        ) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 title = data.get("title")

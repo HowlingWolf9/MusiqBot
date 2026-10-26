@@ -11,15 +11,16 @@ ytdl_format_options = {
     # Newer defaults (e.g. android_vr) serve music-catalog URLs that reject
     # non-app user agents / lack PO tokens at playback time.
     "extractor_args": {
-        "youtube": {
-            "player_client": ["android", "web"]
-        }
+        "youtube": {"player_client": ["android", "web"]}
     },
 }
 
-# Low-latency streaming options: prioritize Opus WebM and resilient reconnects without dropping packets
+# Low-latency streaming options: prioritize Opus WebM and resilient reconnects
+# without dropping packets
 ffmpeg_options = {
-    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin",
+    "before_options": (
+        "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin"
+    ),
     "options": "-vn",
 }
 

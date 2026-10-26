@@ -1,28 +1,34 @@
 import asyncio
+import contextlib
 import datetime
 import functools
 import json
 import logging
 import os
+
 import aiohttp
 import discord
+import yt_dlp
 from discord import app_commands
 from discord.ext import commands, tasks
-import yt_dlp
 
 from music.audio import YTDLSource
 from music.config import ytdl
 from music.models import LoopMode, Song
-from music.permissions import check_dj_permission
+from music.permissions import check_dj, check_dj_permission
 from music.player import MusicPlayer
 from music.services.autocomplete import fetch_song_autocomplete
 from music.services.spotify import resolve_spotify as resolve_spotify_service
+from music.utils import delete_message_safe
 from music.views.player_view import PlayerView
 from music.views.queue_view import QueueView
 from music.views.search_view import SearchView
-from music.utils import delete_message_safe
 
 logger = logging.getLogger(__name__)
+
+# Debounce window for background orphan-index flushes. These records are
+# crash-recovery hints, not transactions, so batching writes is safe.
+ORPHAN_FLUSH_DELAY = 2.0
 
 
 class MusicCog(commands.Cog):
@@ -37,10 +43,17 @@ class MusicCog(commands.Cog):
         self.session = None
         self.orphan_index_file = "music_orphans.json"
         self.orphan_index = self._load_orphan_index()
+        self._orphan_dirty = False
+        self._orphan_save_task = None
+        self._background_tasks = set()
 
     async def get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession()
+            # Default timeout guards every request made through this session;
+            # individual services may still pass a tighter per-request timeout.
+            self.session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=10)
+            )
         return self.session
 
     async def cog_load(self):
@@ -49,6 +62,8 @@ class MusicCog(commands.Cog):
 
     async def cog_unload(self):
         self.empty_channel_sweep.cancel()
+        with contextlib.suppress(asyncio.TimeoutError, Exception):
+            await asyncio.wait_for(self.shutdown_cleanup(), timeout=15)
         if self.session and not self.session.closed:
             await self.session.close()
 
@@ -74,6 +89,55 @@ class MusicCog(commands.Cog):
         except Exception:
             logger.warning("Failed to save orphan message index", exc_info=True)
 
+    async def _write_orphan_snapshot_async(self):
+        """Serialize the index on the event loop, then write it in an
+        executor so the blocking fsync never stalls playback."""
+        payload = json.dumps(self.orphan_index)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None, functools.partial(self._write_orphan_payload, payload)
+        )
+
+    def _write_orphan_payload(self, payload: str):
+        try:
+            tmp = f"{self.orphan_index_file}.tmp"
+            with open(tmp, "w") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.orphan_index_file)
+        except Exception:
+            logger.warning("Failed to save orphan message index", exc_info=True)
+
+    def _schedule_orphan_save(self):
+        """Mark the index dirty and ensure a debounced flush task exists."""
+        self._orphan_dirty = True
+        task = self._orphan_save_task
+        if task is not None and not task.done():
+            return
+        self._orphan_save_task = self.bot.loop.create_task(
+            self._delayed_orphan_save()
+        )
+
+    async def _delayed_orphan_save(self):
+        await asyncio.sleep(ORPHAN_FLUSH_DELAY)
+        self._orphan_dirty = False
+        await self._write_orphan_snapshot_async()
+
+    async def flush_orphan_index_now(self):
+        """Cancel any pending debounced flush and write immediately."""
+        task = self._orphan_save_task
+        self._orphan_save_task = None
+        if isinstance(task, asyncio.Task) and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        if not self._orphan_dirty:
+            return
+        self._orphan_dirty = False
+        with contextlib.suppress(Exception):
+            await self._write_orphan_snapshot_async()
+
     def track_message(self, guild_id, msg):
         """Register a public UI message so a future boot can delete it even
         if this process dies before cleaning up (watchmedo reload etc.)."""
@@ -86,7 +150,7 @@ class MusicCog(commands.Cog):
             entries.append(record)
             if len(entries) > 50:  # bound growth per guild
                 del entries[: len(entries) - 50]
-            self._save_orphan_index()
+            self._schedule_orphan_save()
 
     def untrack_message(self, guild_id, msg):
         if not msg:
@@ -98,7 +162,7 @@ class MusicCog(commands.Cog):
             entries.remove(record)
             if not entries:
                 self.orphan_index.pop(gid, None)
-            self._save_orphan_index()
+            self._schedule_orphan_save()
 
     async def _sweep_orphans(self):
         """Delete UI messages left behind by a previous process instance."""
@@ -268,11 +332,16 @@ class MusicCog(commands.Cog):
             logger.error(f"Failed to save settings: {e}", exc_info=True)
 
     async def save_settings_async(self):
-        try:
-            loop = self.bot.loop or asyncio.get_running_loop()
-        except RuntimeError:
-            loop = self.bot.loop or asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, functools.partial(self.save_settings))
+
+    def peek_player(self, interaction):
+        """Return the existing guild player WITHOUT creating one.
+
+        Read-only commands use this so they don't spawn an idle
+        MusicPlayer/player_loop for guilds that never played anything.
+        """
+        return self.players.get(interaction.guild.id)
 
     def get_player(self, interaction):
         try:
@@ -288,28 +357,38 @@ class MusicCog(commands.Cog):
 
     async def cleanup(self, guild):
         self._cancel_empty_channel_timer(guild.id)
-        self.voice_connect_locks.pop(guild.id, None)
-        try:
-            await guild.voice_client.disconnect()
-        except AttributeError:
-            pass
-        try:
-            player = self.players.pop(guild.id)
-            for attr in ("np_msg", "queue_msg"):
-                msg = getattr(player, attr, None)
-                if await delete_message_safe(msg):
-                    self.untrack_message(guild.id, msg)
-                setattr(player, attr, None)
-            for song in list(player.queue._queue):
-                if song.added_msg and await delete_message_safe(song.added_msg):
-                    self.untrack_message(guild.id, song.added_msg)
-                song.added_msg = None
-            if player.current and player.current.added_msg:
-                player.current.added_msg = None
-            player.clear_queue()
-            player.player_task.cancel()
-        except KeyError:
-            pass
+        lock = self.voice_connect_locks.pop(guild.id, None)
+        # Pop the player BEFORE tearing down so a concurrent /play can't
+        # fetch it from the registry and enqueue into a dying player.
+        player = self.players.pop(guild.id, None)
+
+        async def _disconnect():
+            try:
+                await guild.voice_client.disconnect()
+            except AttributeError:
+                pass
+
+        if lock is not None:
+            async with lock:
+                await _disconnect()
+        else:
+            await _disconnect()
+
+        if player is None:
+            return
+        for attr in ("np_msg", "queue_msg"):
+            msg = getattr(player, attr, None)
+            if await delete_message_safe(msg):
+                self.untrack_message(guild.id, msg)
+            setattr(player, attr, None)
+        for song in list(player.queue._queue):
+            if song.added_msg and await delete_message_safe(song.added_msg):
+                self.untrack_message(guild.id, song.added_msg)
+            song.added_msg = None
+        if player.current and player.current.added_msg:
+            player.current.added_msg = None
+        player.clear_queue()
+        player.player_task.cancel()
 
     async def shutdown_cleanup(self):
         """Best-effort teardown on process shutdown/dev reload.
@@ -326,6 +405,27 @@ class MusicCog(commands.Cog):
                 logger.warning(f"Shutdown cleanup timed out for guild {guild.id}")
             except Exception:
                 logger.exception(f"Shutdown cleanup failed for guild {guild.id}")
+        await self.flush_orphan_index_now()
+
+    def spawn_background(self, coro):
+        """Create a retained fire-and-forget task.
+
+        Keeps a reference so the task can't be garbage-collected mid-flight
+        and logs exceptions instead of leaking them as unretrieved results.
+        """
+        task = self.bot.loop.create_task(coro)
+        self._background_tasks.add(task)
+
+        def _on_done(t):
+            self._background_tasks.discard(t)
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.error("Background task failed", exc_info=exc)
+
+        task.add_done_callback(_on_done)
+        return task
 
     async def ensure_voice_client(
         self, interaction: discord.Interaction
@@ -406,7 +506,7 @@ class MusicCog(commands.Cog):
             "quiet": True,
             "skip_download": True,
         }
-        loop = self.bot.loop or asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def extract():
             with yt_dlp.YoutubeDL(ydl_opts) as ydl_inst:
@@ -436,11 +536,9 @@ class MusicCog(commands.Cog):
             if not isinstance(entry, dict):
                 continue
             title = entry.get("title") or "Unknown Track"
-            webpage_url = (
-                entry.get("url")
-                or entry.get("webpage_url")
-                or (f"https://www.youtube.com/watch?v={entry.get('id')}" if entry.get("id") else None)
-            )
+            webpage_url = entry.get("url") or entry.get("webpage_url")
+            if not webpage_url and entry.get("id"):
+                webpage_url = f"https://www.youtube.com/watch?v={entry.get('id')}"
             if not webpage_url:
                 continue
             duration = entry.get("duration")
@@ -455,10 +553,15 @@ class MusicCog(commands.Cog):
             await player.queue.put(song)
             count += 1
 
-        try:
-            await interaction.followup.send(
-                f"🎶 Added **{count}** tracks from playlist to queue!", ephemeral=True
+        if len(entries) > 100:
+            summary = (
+                f"🎶 Added **{count}** of **{len(entries)}** playlist tracks "
+                f"(limit 100)."
             )
+        else:
+            summary = f"🎶 Added **{count}** tracks from playlist to queue!"
+        try:
+            await interaction.followup.send(summary, ephemeral=True)
         except Exception:
             pass
 
@@ -575,7 +678,7 @@ class MusicCog(commands.Cog):
 
         try:
             url = f"ytsearch5:{query}"
-            loop = self.bot.loop or asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             data = await loop.run_in_executor(
                 None, lambda: ytdl.extract_info(url, download=False)
             )
@@ -592,23 +695,27 @@ class MusicCog(commands.Cog):
         entries = data["entries"][:5]
         view = SearchView(entries, interaction.user, self)
 
-        self.get_player(interaction)
-
         msg = await interaction.followup.send(
             "🔎 **Select a song to play:**", view=view, ephemeral=True
         )
         view.message = msg
 
-    @app_commands.command(name="skip", description="Skip the currently playing song")
+    @app_commands.command(
+        name="skip",
+        description="Skip the currently playing song (non-DJs vote to skip)",
+    )
     async def skip(self, interaction: discord.Interaction):
         if not await self.verify_voice(interaction):
             return
-        if not await check_dj_permission(
-            interaction,
-            "❌ You need the 'DJ' role or Manage Server permissions to use this command.",
-        ):
-            return
+        await self.handle_skip_request(interaction)
 
+    async def handle_skip_request(self, interaction: discord.Interaction):
+        """Shared by /skip and the Now Playing ⏭️ button.
+
+        DJs skip immediately; anyone else in the same voice channel votes,
+        and the track skips once votes reach a simple majority of humans.
+        The current track's requester can always skip their own pick.
+        """
         voice_client = interaction.guild.voice_client
         if not voice_client or (
             not voice_client.is_playing() and not voice_client.is_paused()
@@ -618,10 +725,48 @@ class MusicCog(commands.Cog):
             )
 
         player = self.get_player(interaction)
-        player.manual_skip = True
-        voice_client.stop()
+        user_id = interaction.user.id
+
+        if check_dj(interaction):
+            player.skip_votes.clear()
+            player.manual_skip = True
+            voice_client.stop()
+            return await interaction.response.send_message(
+                "⏭️ Skipped the current song."
+            )
+
+        requester = getattr(player.current, "requester", None)
+        if requester is not None and getattr(requester, "id", None) == user_id:
+            player.skip_votes.clear()
+            player.manual_skip = True
+            voice_client.stop()
+            return await interaction.response.send_message(
+                "⏭️ You requested this track — skipped."
+            )
+
+        required = player.required_skip_votes()
+        if user_id in player.skip_votes:
+            remaining = required - len(player.skip_votes)
+            return await interaction.response.send_message(
+                f"🗳️ You already voted to skip this track "
+                f"(**{len(player.skip_votes)}/{required}**, "
+                f"{remaining} more needed).",
+                ephemeral=True,
+            )
+
+        player.skip_votes.add(user_id)
+        if len(player.skip_votes) >= required:
+            player.skip_votes.clear()
+            player.manual_skip = True
+            voice_client.stop()
+            return await interaction.response.send_message(
+                f"⏭️ Vote threshold reached (**{required}/{required}**) — skipping."
+            )
+
         await interaction.response.send_message(
-            "⏭️ Skipped the current song."
+            f"🗳️ Skip vote registered (**{len(player.skip_votes)}/{required}**). "
+            f"The track skips when the majority agrees.",
+            ephemeral=True,
         )
 
     @app_commands.command(name="stop", description="Stop the music and clear the queue")
@@ -662,6 +807,9 @@ class MusicCog(commands.Cog):
             and interaction.guild.voice_client.is_playing()
         ):
             interaction.guild.voice_client.pause()
+            player = self.peek_player(interaction)
+            if player:
+                player.mark_paused()
             await interaction.response.send_message(
                 "⏸️ Paused the music."
             )
@@ -685,6 +833,9 @@ class MusicCog(commands.Cog):
             and interaction.guild.voice_client.is_paused()
         ):
             interaction.guild.voice_client.resume()
+            player = self.peek_player(interaction)
+            if player:
+                player.mark_resumed()
             await interaction.response.send_message(
                 "▶️ Resumed the music."
             )
@@ -699,7 +850,11 @@ class MusicCog(commands.Cog):
             return await interaction.response.send_message(
                 "This command can only be used in a server.", ephemeral=True
             )
-        player = self.get_player(interaction)
+        player = self.peek_player(interaction)
+        if player is None:
+            return await interaction.response.send_message(
+                "The queue is empty.", ephemeral=True
+            )
 
         await player.delete_message_safe(player.queue_msg)
         view = QueueView(player, interaction.user)
@@ -819,7 +974,7 @@ class MusicCog(commands.Cog):
         )
 
         if player.autoplay and player.queue.empty() and player.history:
-            self.bot.loop.create_task(player.prefetch_autoplay())
+            self.spawn_background(player.prefetch_autoplay())
 
     @app_commands.command(name="loop", description="Set loop mode (off, track, queue)")
     @app_commands.choices(
@@ -1052,7 +1207,7 @@ class MusicCog(commands.Cog):
                 "This command can only be used in a server.", ephemeral=True
             )
 
-        player = self.get_player(interaction)
+        player = self.peek_player(interaction)
         guild_id = str(interaction.guild.id)
         guild_settings = self.settings.get(guild_id, {})
 
@@ -1061,9 +1216,14 @@ class MusicCog(commands.Cog):
             if guild_settings.get("dj_role_id")
             else "Role named 'DJ' or Manage Server"
         )
-        vol_pct = int(player.volume * 100)
-        autoplay_str = "Enabled" if player.autoplay else "Disabled"
-        loop_str = player.loop_mode.value.capitalize()
+        volume = player.volume if player else guild_settings.get("volume", 0.5)
+        autoplay = (
+            player.autoplay if player else guild_settings.get("autoplay", False)
+        )
+        loop_mode = player.loop_mode if player else LoopMode.OFF
+        vol_pct = int(volume * 100)
+        autoplay_str = "Enabled" if autoplay else "Disabled"
+        loop_str = loop_mode.value.capitalize()
 
         embed = discord.Embed(
             title=f"⚙️ Settings for {interaction.guild.name}",
@@ -1094,7 +1254,8 @@ class MusicCog(commands.Cog):
         hours: int = 0,
         days: int = 0,
     ):
-        if not getattr(interaction.user, "guild_permissions", None) or not interaction.user.guild_permissions.manage_messages:
+        user_perms = getattr(interaction.user, "guild_permissions", None)
+        if not user_perms or not user_perms.manage_messages:
             return await interaction.response.send_message(
                 "❌ You need 'Manage Messages' permission to use this command.",
                 ephemeral=True,
@@ -1116,14 +1277,20 @@ class MusicCog(commands.Cog):
                 return m.author == self.bot.user
 
             can_manage = (
-                getattr(interaction.channel.permissions_for(interaction.guild.me), "manage_messages", False)
+                getattr(
+                    interaction.channel.permissions_for(interaction.guild.me),
+                    "manage_messages",
+                    False,
+                )
                 if interaction.guild and interaction.guild.me
                 else False
             )
             # Discord API rejects bulk deletion of messages older than 14 days with HTTP 400
             can_bulk = can_manage and delta.days < 14
 
-            deleted = await interaction.channel.purge(limit=amount, after=after_time, check=is_me, bulk=can_bulk)
+            deleted = await interaction.channel.purge(
+                limit=amount, after=after_time, check=is_me, bulk=can_bulk
+            )
 
             time_str = []
             if days:
@@ -1134,7 +1301,8 @@ class MusicCog(commands.Cog):
                 time_str.append(f"{minutes} minutes")
 
             await interaction.followup.send(
-                f"✅ Successfully deleted **{len(deleted)}** of my messages from the last {' '.join(time_str)}.",
+                f"✅ Successfully deleted **{len(deleted)}** of my messages from "
+                f"the last {' '.join(time_str)}.",
                 ephemeral=True
             )
         except discord.Forbidden:
