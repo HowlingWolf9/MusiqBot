@@ -26,6 +26,7 @@ _SONG_DATA_KEYS = (
     # create_source() reuses the stream URL + negotiated User-Agent without a
     # second network round-trip while the metadata is fresh.
     "http_headers",
+    "_extracted_at",
 )
 
 
@@ -43,6 +44,9 @@ class Song:
         self.thumbnail = data.get("thumbnail")
         self.duration = coerce_duration(data.get("duration"))
         self.uploader = data.get("uploader") or data.get("artist") or "Unknown Artist"
-        self.extracted_at = time.time()
+        now = time.time()
+        extracted_at = data.get("_extracted_at") if isinstance(data, dict) else None
+        self.extracted_at = float(extracted_at) if extracted_at is not None else now
+        self.data["_extracted_at"] = self.extracted_at
         self.added_msg = None
         self.source = None

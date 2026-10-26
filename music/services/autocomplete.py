@@ -22,7 +22,9 @@ async def fetch_song_autocomplete(
 
     query = current.strip().lower()
     if query in cache:
-        return [_to_choice(s) for s in cache[query] if isinstance(s, str)]
+        val = cache.pop(query)
+        cache[query] = val
+        return [_to_choice(s) for s in val if isinstance(s, str)]
 
     try:
         api_url = f"https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q={urllib.parse.quote(query)}"
@@ -38,9 +40,12 @@ async def fetch_song_autocomplete(
                 ):
                     suggestions = [s for s in data[1][:25] if isinstance(s, str)]
                     if suggestions:
+                        if query in cache:
+                            cache.pop(query)
                         cache[query] = suggestions
-                        if len(cache) > 500:
-                            cache.clear()
+                        while len(cache) > 500:
+                            oldest_key = next(iter(cache))
+                            cache.pop(oldest_key, None)
                         return [_to_choice(s) for s in suggestions]
     except Exception:
         pass

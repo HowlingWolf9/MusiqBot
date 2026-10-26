@@ -1,10 +1,12 @@
 import asyncio
 import logging
 import re
+import time
 
 import discord
 
-from music.config import ffmpeg_options, ytdl
+from music.config import ffmpeg_options, ytdl, ytdl_lock
+from music.utils import is_direct_stream_url
 
 logger = logging.getLogger(__name__)
 
@@ -92,14 +94,18 @@ class YTDLSource(discord.PCMVolumeTransformer):
             elif url.startswith("ytsearch:"):
                 url = url.replace("ytsearch:", "ytsearch5:", 1)
 
-        data = await loop.run_in_executor(
-            None, lambda: ytdl.extract_info(url, download=False)
-        )
+        def _extract():
+            with ytdl_lock:
+                return ytdl.extract_info(url, download=False)
+
+        data = await loop.run_in_executor(None, _extract)
         if "entries" in data and data["entries"]:
             if is_direct_url:
                 data = data["entries"][0]
             else:
                 data = select_best_search_entry(data["entries"])
+        if isinstance(data, dict):
+            data.setdefault("_extracted_at", time.time())
         return data
 
     @classmethod
@@ -109,10 +115,9 @@ class YTDLSource(discord.PCMVolumeTransformer):
         else:
             data = await cls.extract_info(url_or_data, loop=loop)
 
-        if "url" not in data:
-            data = await cls.extract_info(
-                data.get("webpage_url", url_or_data), loop=loop
-            )
+        if not is_direct_stream_url(data):
+            target_url = data.get("webpage_url") or data.get("url") or url_or_data
+            data = await cls.extract_info(target_url, loop=loop)
 
         opts = ffmpeg_options.copy()
         if seek is not None:

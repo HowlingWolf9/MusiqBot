@@ -24,13 +24,16 @@ from music import (
     extract_video_id,
     fetch_song_autocomplete,
     ffmpeg_options,
+    is_direct_stream_url,
     is_valid_music_entry,
     normalize_title,
     resolve_spotify,
+    resolve_spotify_playlist,
     select_best_search_entry,
     setup,
     ytdl,
     ytdl_format_options,
+    ytdl_lock,
 )
 
 __all__ = [
@@ -40,6 +43,7 @@ __all__ = [
     "MusicQueue",
     "coerce_duration",
     "extract_video_id",
+    "is_direct_stream_url",
     "is_valid_music_entry",
     "normalize_title",
     "PlayerView",
@@ -55,9 +59,11 @@ __all__ = [
     "ffmpeg_options",
     "fetch_song_autocomplete",
     "resolve_spotify",
+    "resolve_spotify_playlist",
     "select_best_search_entry",
     "setup",
     "yt_dlp",
     "ytdl",
     "ytdl_format_options",
+    "ytdl_lock",
 ]

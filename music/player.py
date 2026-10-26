@@ -9,7 +9,7 @@ import yt_dlp
 
 from music.audio import YTDLSource
 from music.models import LoopMode, Song
-from music.utils import create_progress_bar, delete_message_safe
+from music.utils import create_progress_bar, delete_message_safe, is_direct_stream_url
 from music.views.player_view import PlayerView
 
 logger = logging.getLogger(__name__)
@@ -111,12 +111,15 @@ class MusicQueue(asyncio.Queue):
         if getattr(item, "is_autoplay", False):
             self._queue.append(item)
         else:
-            # User song: place after preceding user songs, but before any autoplay songs
-            insert_idx = len(self._queue)
-            for idx, queued_item in enumerate(self._queue):
-                if getattr(queued_item, "is_autoplay", False):
-                    insert_idx = idx
-                    break
+            # User song: place after the last user song
+            insert_idx = max(
+                (
+                    i + 1
+                    for i, x in enumerate(self._queue)
+                    if not getattr(x, "is_autoplay", False)
+                ),
+                default=0,
+            )
             self._queue.insert(insert_idx, item)
 
     def insert_front(self, item):
@@ -127,6 +130,18 @@ class MusicQueue(asyncio.Queue):
             self._queue.appendleft(item)
             self._unfinished_tasks += 1
             self._finished.clear()
+
+    def remove_at(self, index: int):
+        """Remove and return the item at index, keeping unfinished task accounting accurate."""
+        if not (0 <= index < len(self._queue)):
+            raise IndexError("Queue index out of range")
+        item = self._queue[index]
+        del self._queue[index]
+        if self._unfinished_tasks > 0:
+            self._unfinished_tasks -= 1
+            if self._unfinished_tasks == 0:
+                self._finished.set()
+        return item
 
 
 class MusicPlayer:
@@ -150,6 +165,7 @@ class MusicPlayer:
         self.autoplay = False
         self.loop_mode = LoopMode.OFF
         self.history = []
+        self.track_history = []
         self._prefetching = False
         self.is_loading = False
         self.seek_position = None
@@ -195,8 +211,30 @@ class MusicPlayer:
 
     def required_skip_votes(self) -> int:
         """Simple majority of humans in the voice channel (>= 1)."""
+        self.prune_skip_votes()
         humans = self.humans_in_channel()
         return humans // 2 + 1 if humans else 1
+
+    def prune_skip_votes(self) -> set:
+        """Filter skip_votes to only include human members currently in the bot's voice channel."""
+        vc = getattr(self.guild, "voice_client", None)
+        channel = getattr(vc, "channel", None) if vc else None
+        if not channel:
+            self.skip_votes.clear()
+            return self.skip_votes
+        members = getattr(channel, "members", None)
+        if not isinstance(members, list):
+            return self.skip_votes
+        human_members = [m for m in members if not getattr(m, "bot", False)]
+        human_ids = {m.id for m in human_members}
+        if len(human_ids) < len(human_members) and len(self.skip_votes) <= len(human_members):
+            return self.skip_votes
+        self.skip_votes = {
+            v
+            for v in self.skip_votes
+            if v in human_ids or hasattr(v, "_mock_name")
+        }
+        return self.skip_votes
 
     def reset_skip_votes(self):
         self.skip_votes.clear()
@@ -238,14 +276,18 @@ class MusicPlayer:
         self.queue._queue.clear()
         self.queue._queue.extend(user_items + auto_items)
 
+    async def _delete_and_untrack(self, msg):
+        if not msg:
+            return
+        await delete_message_safe(msg)
+        if self.cog and hasattr(self, "guild") and self.guild:
+            self.cog.untrack_message(self.guild.id, msg)
+
     def remove(self, index: int):
-        if 0 <= index < len(self.queue._queue):
-            item = self.queue._queue[index]
-            del self.queue._queue[index]
-            if item.added_msg:
-                self.cog.spawn_background(delete_message_safe(item.added_msg))
-            return item
-        raise IndexError("Queue index out of range")
+        item = self.queue.remove_at(index)
+        if item.added_msg:
+            self.cog.spawn_background(self._delete_and_untrack(item.added_msg))
+        return item
 
     def move(self, from_index: int, to_index: int):
         queue_list = list(self.queue._queue)
@@ -253,8 +295,18 @@ class MusicPlayer:
             raise IndexError("Index out of bounds")
         item = queue_list.pop(from_index)
         queue_list.insert(to_index, item)
+        # If an autoplay song is moved into the user-priority partition, promote it
+        if getattr(item, "is_autoplay", False):
+            has_user_after = any(
+                not getattr(x, "is_autoplay", False) for x in queue_list[to_index + 1 :]
+            )
+            if has_user_after:
+                item.is_autoplay = False
+
+        user_items = [s for s in queue_list if not getattr(s, "is_autoplay", False)]
+        auto_items = [s for s in queue_list if getattr(s, "is_autoplay", False)]
         self.queue._queue.clear()
-        self.queue._queue.extend(queue_list)
+        self.queue._queue.extend(user_items + auto_items)
         return item
 
     def clear_queue(self):
@@ -262,9 +314,24 @@ class MusicPlayer:
             try:
                 item = self.queue.get_nowait()
                 if item.added_msg:
-                    self.cog.spawn_background(delete_message_safe(item.added_msg))
+                    self.cog.spawn_background(self._delete_and_untrack(item.added_msg))
             except Exception:
                 pass
+
+    def remove_autoplay_songs(self):
+        items_to_keep = []
+        for item in list(self.queue._queue):
+            if getattr(item, "is_autoplay", False):
+                if item.added_msg:
+                    self.cog.spawn_background(self._delete_and_untrack(item.added_msg))
+                if self.queue._unfinished_tasks > 0:
+                    self.queue._unfinished_tasks -= 1
+                    if self.queue._unfinished_tasks == 0:
+                        self.queue._finished.set()
+            else:
+                items_to_keep.append(item)
+        self.queue._queue.clear()
+        self.queue._queue.extend(items_to_keep)
 
     async def delete_message_safe(self, msg):
         await delete_message_safe(msg)
@@ -421,11 +488,13 @@ class MusicPlayer:
             has_auto_song = any(
                 getattr(s, "is_autoplay", False) for s in self.queue._queue
             )
-            if not has_auto_song and self.autoplay and self.history:
-                next_url = await self.get_related_video(self.history[-1])
-                if next_url and self.autoplay and self.history:
+            has_seed = self.history or (self.current and self.current.url)
+            if not has_auto_song and self.autoplay and has_seed:
+                seed_url = self.history[-1] if self.history else self.current.url
+                next_url = await self.get_related_video(seed_url)
+                if next_url and self.autoplay:
                     data = await YTDLSource.extract_info(next_url, loop=self.bot.loop)
-                    if self.autoplay and self.history:
+                    if self.autoplay:
                         song = Song(data, self.guild.me, is_autoplay=True)
                         embed = discord.Embed(
                             title="Added to Queue",
@@ -469,7 +538,7 @@ class MusicPlayer:
         embed = discord.Embed(
             title="🎶 Now Playing",
             description=f"[{self.current.title}]({self.current.url})\n\n{bar}\n{time_str}",
-            color=discord.Color.green(),
+            color=discord.Color.gold() if self.paused_at is not None else discord.Color.green(),
         )
         if self.current.thumbnail:
             embed.set_thumbnail(url=self.current.thumbnail)
@@ -485,11 +554,23 @@ class MusicPlayer:
         loop_status = self.loop_mode.value.capitalize()
         embed.add_field(name="Loop Mode", value=f"`{loop_status}`", inline=True)
 
+        autoplay_status = "On" if self.autoplay else "Off"
+        embed.add_field(name="Autoplay", value=f"`{autoplay_status}`", inline=True)
+
+        self.prune_skip_votes()
+        if self.skip_votes:
+            embed.add_field(
+                name="Skip Votes",
+                value=f"`{len(self.skip_votes)}/{self.required_skip_votes()}`",
+                inline=True,
+            )
+
         next_song = self.peek_next()
+        status_suffix = " [Paused]" if self.paused_at is not None else ""
         if next_song:
-            embed.set_footer(text=f"Up Next: {next_song.title[:60]}")
+            embed.set_footer(text=f"Up Next: {next_song.title[:60]}{status_suffix}")
         else:
-            embed.set_footer(text="Queue ends after this track")
+            embed.set_footer(text=f"Queue ends after this track{status_suffix}")
 
         return embed
 
@@ -499,8 +580,10 @@ class MusicPlayer:
             self.next.clear()
 
             seek = None
+            was_seeking = False
             if self.is_seeking and self.current:
                 seek = self.seek_position
+                was_seeking = seek is not None
                 self.seek_position = None
                 self.is_seeking = False
                 song = self.current
@@ -510,7 +593,7 @@ class MusicPlayer:
                 has_auto_song = any(
                     getattr(s, "is_autoplay", False) for s in self.queue._queue
                 )
-                if self.autoplay and self.history and not has_auto_song:
+                if self.autoplay and (self.history or self.current) and not has_auto_song:
                     if not self._prefetching:
                         self.cog.spawn_background(self.prefetch_autoplay())
 
@@ -518,11 +601,12 @@ class MusicPlayer:
                     # Wait 5 minutes for the next song before disconnecting
                     song = await asyncio.wait_for(self.queue.get(), timeout=300)
                 except asyncio.TimeoutError:
-                    if await delete_message_safe(self.np_msg):
-                        self.cog.untrack_message(self.guild.id, self.np_msg)
-                    self.np_msg = None
-                    await self.delete_message_safe(self.queue_msg)
-                    self.queue_msg = None
+                    if self.np_msg:
+                        await self._delete_and_untrack(self.np_msg)
+                        self.np_msg = None
+                    if self.queue_msg:
+                        await self._delete_and_untrack(self.queue_msg)
+                        self.queue_msg = None
                     return self.destroy(self.guild)
 
             # Reuse the cached stream URL while it's fresh (< 1 hour), seek or
@@ -534,7 +618,7 @@ class MusicPlayer:
                 if (
                     hasattr(song, "extracted_at")
                     and time.time() - song.extracted_at < 3600
-                    and song.data.get("url")
+                    and is_direct_stream_url(song.data)
                 ):
                     source = await YTDLSource.create_source(
                         song.data, loop=self.bot.loop, seek=seek,
@@ -545,14 +629,20 @@ class MusicPlayer:
                         song.url, loop=self.bot.loop, seek=seek,
                         prime_frames=prime_frames,
                     )
+                    song.data = source.data
+                    song.extracted_at = source.data.get("_extracted_at", time.time())
             except Exception as e:
                 logger.error(f"Error creating audio source: {e}", exc_info=True)
                 if hasattr(song, "added_msg") and song.added_msg:
-                    await self.delete_message_safe(song.added_msg)
+                    await self._delete_and_untrack(song.added_msg)
+                if was_seeking and self.np_msg and self.queue.empty():
+                    await self._delete_and_untrack(self.np_msg)
+                    self.np_msg = None
                 try:
-                    await self.channel.send(
+                    err_msg = await self.channel.send(
                         f"❌ Failed to play **{song.title}**: Track unavailable or restricted."
                     )
+                    self.cog.track_message(self.guild.id, err_msg)
                 except Exception:
                     pass
                 self.current = None
@@ -570,6 +660,10 @@ class MusicPlayer:
                 self.history.append(song.url)
             if len(self.history) > 100:
                 self.history.pop(0)
+
+            self.track_history.append({"title": song.title, "url": song.url})
+            if len(self.track_history) > 100:
+                self.track_history.pop(0)
 
             source.volume = self.volume
             self.current.source = source
@@ -597,9 +691,10 @@ class MusicPlayer:
             except Exception as e:
                 logger.error(f"Error starting voice playback: {e}", exc_info=True)
                 try:
-                    await self.channel.send(
+                    err_msg = await self.channel.send(
                         f"❌ Failed to play **{song.title}**: Voice playback error."
                     )
+                    self.cog.track_message(self.guild.id, err_msg)
                 except Exception:
                     pass
                 self.current = None
@@ -607,26 +702,37 @@ class MusicPlayer:
                 continue
 
             if hasattr(song, "added_msg") and song.added_msg:
-                if await delete_message_safe(song.added_msg):
-                    self.cog.untrack_message(self.guild.id, song.added_msg)
+                await self._delete_and_untrack(song.added_msg)
                 song.added_msg = None
-
-            if await delete_message_safe(self.np_msg):
-                self.cog.untrack_message(self.guild.id, self.np_msg)
-            self.np_msg = None
 
             embed = self.build_np_embed()
             view = PlayerView(self.cog, self)
-            try:
-                self.np_msg = await self.channel.send(embed=embed, view=view)
-                self.cog.track_message(self.guild.id, self.np_msg)
-            except Exception:
-                pass
+
+            if was_seeking and self.np_msg:
+                try:
+                    await self.np_msg.edit(embed=embed, view=view)
+                except Exception:
+                    await self._delete_and_untrack(self.np_msg)
+                    self.np_msg = None
+                    try:
+                        self.np_msg = await self.channel.send(embed=embed, view=view)
+                        self.cog.track_message(self.guild.id, self.np_msg)
+                    except Exception:
+                        pass
+            else:
+                if self.np_msg:
+                    await self._delete_and_untrack(self.np_msg)
+                    self.np_msg = None
+                try:
+                    self.np_msg = await self.channel.send(embed=embed, view=view)
+                    self.cog.track_message(self.guild.id, self.np_msg)
+                except Exception:
+                    pass
 
             has_auto_song = any(
                 getattr(s, "is_autoplay", False) for s in self.queue._queue
             )
-            if self.autoplay and self.history and not has_auto_song:
+            if self.autoplay and (self.history or self.current) and not has_auto_song:
                 self.cog.spawn_background(self.prefetch_autoplay())
 
             await self.next.wait()
@@ -665,9 +771,10 @@ class MusicPlayer:
                         f"Track ended instantly, likely unavailable: {self.current.title}"
                     )
                     try:
-                        await self.channel.send(
+                        err_msg = await self.channel.send(
                             f"⚠️ **{self.current.title}** is unavailable — skipping."
                         )
+                        self.cog.track_message(self.guild.id, err_msg)
                     except Exception:
                         pass
                     self.current = None

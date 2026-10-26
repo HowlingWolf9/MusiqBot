@@ -31,10 +31,8 @@ class SearchSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        if not interaction.user.voice:
-            return await interaction.response.send_message(
-                "🔴 You need to join a voice channel first!", ephemeral=True
-            )
+        if not await self.cog.verify_voice(interaction):
+            return
 
         await interaction.response.defer(ephemeral=True)
 

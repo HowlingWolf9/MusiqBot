@@ -1,6 +1,6 @@
 from music.audio import YTDLSource, select_best_search_entry
 from music.cog import MusicCog, setup
-from music.config import ffmpeg_options, ytdl, ytdl_format_options
+from music.config import ffmpeg_options, ytdl, ytdl_format_options, ytdl_lock
 from music.models import LoopMode, Song
 from music.permissions import check_dj, check_dj_permission
 from music.player import (
@@ -11,8 +11,13 @@ from music.player import (
     normalize_title,
 )
 from music.services.autocomplete import fetch_song_autocomplete
-from music.services.spotify import resolve_spotify
-from music.utils import coerce_duration, create_progress_bar, delete_message_safe
+from music.services.spotify import resolve_spotify, resolve_spotify_playlist
+from music.utils import (
+    coerce_duration,
+    create_progress_bar,
+    delete_message_safe,
+    is_direct_stream_url,
+)
 from music.views.player_view import PlayerView
 from music.views.queue_view import QueueView
 from music.views.search_view import SearchSelect, SearchView
@@ -33,14 +38,17 @@ __all__ = [
     "check_dj_permission",
     "create_progress_bar",
     "delete_message_safe",
+    "is_direct_stream_url",
     "PlayerView",
     "QueueView",
     "SearchSelect",
     "SearchView",
     "resolve_spotify",
+    "resolve_spotify_playlist",
     "fetch_song_autocomplete",
     "ytdl",
     "ytdl_format_options",
+    "ytdl_lock",
     "ffmpeg_options",
     "setup",
 ]

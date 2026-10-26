@@ -1,18 +1,19 @@
 #!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Create user systemd directory if it doesn't exist
 mkdir -p ~/.config/systemd/user/
 
 # Create the service file
-cat << 'EOF' > ~/.config/systemd/user/musiqbot.service
+cat << EOF > ~/.config/systemd/user/musiqbot.service
 [Unit]
 Description=MusiqBot Discord Bot
 After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/wolf/Projects/MusiqBot
-ExecStart=/home/wolf/Projects/MusiqBot/run_dev.sh
+WorkingDirectory=${SCRIPT_DIR}
+ExecStart=${SCRIPT_DIR}/run_dev.sh
 Restart=on-failure
 RestartSec=5s
 # Graceful teardown budget in music_bot.py is 15s; give it room before SIGKILL
@@ -24,13 +25,13 @@ EOF
 
 # Create the yt-dlp auto-update service + timer (runs update_ytdlp.sh daily;
 # restarts the bot only when the version actually changed)
-cat << 'EOF' > ~/.config/systemd/user/musiqbot-ytdlp-update.service
+cat << EOF > ~/.config/systemd/user/musiqbot-ytdlp-update.service
 [Unit]
 Description=MusiqBot yt-dlp auto-update
 
 [Service]
 Type=oneshot
-ExecStart=/home/wolf/Projects/MusiqBot/update_ytdlp.sh
+ExecStart=${SCRIPT_DIR}/update_ytdlp.sh
 EOF
 
 cat << 'EOF' > ~/.config/systemd/user/musiqbot-ytdlp-update.timer

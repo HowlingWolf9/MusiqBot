@@ -1,3 +1,5 @@
+import threading
+
 import yt_dlp
 
 ytdl_format_options = {
@@ -25,3 +27,4 @@ ffmpeg_options = {
 }
 
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
+ytdl_lock = threading.Lock()

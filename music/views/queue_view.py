@@ -17,6 +17,10 @@ class QueueView(discord.ui.View):
 
     def update_buttons(self):
         max_pages = self.get_max_pages()
+        if self.current_page >= max_pages:
+            self.current_page = max(0, max_pages - 1)
+        if self.current_page < 0:
+            self.current_page = 0
         self.children[0].disabled = self.current_page == 0
         self.children[1].disabled = self.current_page >= max_pages - 1
 
@@ -53,8 +57,15 @@ class QueueView(discord.ui.View):
                 autoplay = (
                     " (Autoplay)" if getattr(song, "is_autoplay", False) else ""
                 )
+                dur_str = ""
+                if getattr(song, "duration", None):
+                    dur = int(song.duration)
+                    m, s = divmod(dur, 60)
+                    h, m = divmod(m, 60)
+                    dur_fmt = f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+                    dur_str = f" (`{dur_fmt}`)"
                 return (
-                    f"`{start + i + 1}.` **[{song.title}]({song.url})** | "
+                    f"`{start + i + 1}.` **[{song.title}]({song.url})**{dur_str} | "
                     f"`{song.requester.display_name}{autoplay}`"
                 )
 
@@ -62,7 +73,9 @@ class QueueView(discord.ui.View):
                 fmt_row(i, song) for i, song in enumerate(page_items)
             )
 
-        total_duration = sum(s.duration for s in items if s.duration)
+        total_duration = sum(s.duration for s in items if getattr(s, "duration", None))
+        if self.player.current and getattr(self.player.current, "duration", None):
+            total_duration += int(self.player.current.duration)
         mins, secs = divmod(total_duration, 60)
         hours, mins = divmod(mins, 60)
         dur_str = f"{hours}h {mins}m" if hours else f"{mins}m {secs}s"
@@ -93,6 +106,13 @@ class QueueView(discord.ui.View):
         self.update_buttons()
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
+    @discord.ui.button(emoji="🔄", style=discord.ButtonStyle.secondary)
+    async def refresh_page(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if not interaction.user.voice:
             await interaction.response.send_message(
@@ -111,9 +131,12 @@ class QueueView(discord.ui.View):
 
     async def on_timeout(self):
         if self.message:
-            try:
-                await self.message.delete()
-            except Exception:
-                pass
+            if self.player:
+                await self.player._delete_and_untrack(self.message)
+            else:
+                try:
+                    await self.message.delete()
+                except Exception:
+                    pass
             if self.player and self.player.queue_msg == self.message:
                 self.player.queue_msg = None

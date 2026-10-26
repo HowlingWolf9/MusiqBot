@@ -13,12 +13,13 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from music.audio import YTDLSource
-from music.config import ytdl
+from music.config import ytdl, ytdl_lock
 from music.models import LoopMode, Song
 from music.permissions import check_dj, check_dj_permission
 from music.player import MusicPlayer
 from music.services.autocomplete import fetch_song_autocomplete
 from music.services.spotify import resolve_spotify as resolve_spotify_service
+from music.services.spotify import resolve_spotify_playlist
 from music.utils import delete_message_safe
 from music.views.player_view import PlayerView
 from music.views.queue_view import QueueView
@@ -243,6 +244,19 @@ class MusicCog(commands.Cog):
             before.channel == voice_client.channel
             and after.channel != voice_client.channel
         ):
+            player = self.players.get(member.guild.id)
+            if player:
+                player.prune_skip_votes()
+                if (
+                    player.current
+                    and len(player.skip_votes) > 0
+                    and len(player.skip_votes) >= player.required_skip_votes()
+                ):
+                    player.skip_votes.clear()
+                    player.manual_skip = True
+                    if voice_client.is_playing() or voice_client.is_paused():
+                        voice_client.stop()
+
             non_bot_members = [m for m in voice_client.channel.members if not m.bot]
             if len(non_bot_members) == 0:
                 self._start_empty_channel_timer(member.guild)
@@ -596,19 +610,59 @@ class MusicCog(commands.Cog):
 
         try:
             if "spotify.com" in url:
-                resolved_url = await self.resolve_spotify(url)
-                if resolved_url:
-                    url = resolved_url
-                else:
-                    try:
-                        return await interaction.followup.send(
-                            "❌ Could not resolve Spotify track metadata.",
-                            ephemeral=True,
+                if "/playlist/" in url or "/album/" in url:
+                    session = await self.get_session()
+                    tracks = await resolve_spotify_playlist(session, url)
+                    if not tracks:
+                        try:
+                            return await interaction.followup.send(
+                                "❌ Could not extract tracks from Spotify playlist/album. "
+                                "Make sure the playlist is public.",
+                                ephemeral=True,
+                            )
+                        except Exception:
+                            return
+                    for track_query in tracks:
+                        display_title = track_query.removeprefix("ytsearch:")
+                        song = Song(
+                            {"title": display_title, "webpage_url": track_query},
+                            interaction.user,
                         )
+                        await player.queue.put(song)
+                    msg_text = (
+                        f"🎶 Added **{len(tracks)}** tracks from Spotify playlist/album to queue!"
+                    )
+                    try:
+                        return await interaction.followup.send(msg_text, ephemeral=True)
                     except Exception:
                         return
+                else:
+                    resolved_url = await self.resolve_spotify(url)
+                    if resolved_url:
+                        url = resolved_url
+                    else:
+                        try:
+                            return await interaction.followup.send(
+                                "❌ Could not resolve Spotify track metadata.",
+                                ephemeral=True,
+                            )
+                        except Exception:
+                            return
 
-            if "list=" in url and ("youtube.com" in url or "music.youtube.com" in url):
+            is_yt_domain = any(
+                domain in url
+                for domain in ("youtube.com", "music.youtube.com", "youtu.be")
+            )
+            is_playlist = False
+            if is_yt_domain and "list=" in url:
+                if "/playlist?list=" in url:
+                    is_playlist = True
+                elif "list=RD" in url or "list=UL" in url:
+                    is_playlist = False
+                else:
+                    is_playlist = True
+
+            if is_playlist:
                 return await self.process_playlist(interaction, url, player)
 
             try:
@@ -679,9 +733,12 @@ class MusicCog(commands.Cog):
         try:
             url = f"ytsearch5:{query}"
             loop = asyncio.get_running_loop()
-            data = await loop.run_in_executor(
-                None, lambda: ytdl.extract_info(url, download=False)
-            )
+
+            def _extract():
+                with ytdl_lock:
+                    return ytdl.extract_info(url, download=False)
+
+            data = await loop.run_in_executor(None, _extract)
         except Exception as e:
             return await interaction.followup.send(
                 f"❌ An error occurred: {str(e)}", ephemeral=True
@@ -744,6 +801,7 @@ class MusicCog(commands.Cog):
                 "⏭️ You requested this track — skipped."
             )
 
+        player.prune_skip_votes()
         required = player.required_skip_votes()
         if user_id in player.skip_votes:
             remaining = required - len(player.skip_votes)
@@ -762,6 +820,12 @@ class MusicCog(commands.Cog):
             return await interaction.response.send_message(
                 f"⏭️ Vote threshold reached (**{required}/{required}**) — skipping."
             )
+
+        if player.np_msg:
+            try:
+                await player.np_msg.edit(embed=player.build_np_embed())
+            except Exception:
+                pass
 
         await interaction.response.send_message(
             f"🗳️ Skip vote registered (**{len(player.skip_votes)}/{required}**). "
@@ -782,7 +846,6 @@ class MusicCog(commands.Cog):
         player = self.get_player(interaction)
         player.manual_stop = True
         player.clear_queue()
-        player.history.clear()
 
         voice_client = interaction.guild.voice_client
         if voice_client and (voice_client.is_playing() or voice_client.is_paused()):
@@ -810,6 +873,12 @@ class MusicCog(commands.Cog):
             player = self.peek_player(interaction)
             if player:
                 player.mark_paused()
+                if player.np_msg:
+                    try:
+                        view = PlayerView(self, player)
+                        await player.np_msg.edit(embed=player.build_np_embed(), view=view)
+                    except Exception:
+                        pass
             await interaction.response.send_message(
                 "⏸️ Paused the music."
             )
@@ -836,6 +905,12 @@ class MusicCog(commands.Cog):
             player = self.peek_player(interaction)
             if player:
                 player.mark_resumed()
+                if player.np_msg:
+                    try:
+                        view = PlayerView(self, player)
+                        await player.np_msg.edit(embed=player.build_np_embed(), view=view)
+                    except Exception:
+                        pass
             await interaction.response.send_message(
                 "▶️ Resumed the music."
             )
@@ -856,7 +931,9 @@ class MusicCog(commands.Cog):
                 "The queue is empty.", ephemeral=True
             )
 
-        await player.delete_message_safe(player.queue_msg)
+        if player.queue_msg:
+            await player._delete_and_untrack(player.queue_msg)
+            player.queue_msg = None
         view = QueueView(player, interaction.user)
         embed = view.build_embed()
 
@@ -887,6 +964,48 @@ class MusicCog(commands.Cog):
         await interaction.response.send_message(
             "🎶 Displaying Now Playing.", ephemeral=True
         )
+
+    @app_commands.command(
+        name="history", description="Show recently played tracks in this server"
+    )
+    async def history(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            return await interaction.response.send_message(
+                "This command can only be used in a server.", ephemeral=True
+            )
+
+        player = self.peek_player(interaction)
+        recent_tracks = []
+        if player:
+            if player.track_history:
+                recent_tracks = list(player.track_history)
+            elif player.history:
+                recent_tracks = [{"title": u, "url": u} for u in player.history]
+
+        if not recent_tracks and (not player or not player.current):
+            return await interaction.response.send_message(
+                "No playback history available for this server.", ephemeral=True
+            )
+
+        embed = discord.Embed(
+            title=f"📜 Playback History for {interaction.guild.name}",
+            color=discord.Color.blue(),
+        )
+
+        lines = []
+        for i, t in enumerate(reversed(recent_tracks[-15:]), 1):
+            title = t.get("title") or "Unknown Track"
+            url = t.get("url")
+            if url:
+                lines.append(f"`{i}.` **[{title}]({url})**")
+            else:
+                lines.append(f"`{i}.` **{title}**")
+
+        embed.description = "\n".join(lines) if lines else "No tracks played yet."
+        if player and player.current:
+            embed.set_footer(text=f"Currently Playing: {player.current.title[:50]}")
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(
         name="volume", description="Set the volume of the bot (1-100)"
@@ -968,12 +1087,31 @@ class MusicCog(commands.Cog):
         self.settings[guild_id]["autoplay"] = player.autoplay
         await self.save_settings_async()
 
-        status = "enabled" if player.autoplay else "disabled"
-        await interaction.response.send_message(
-            f"📻 Autoplay is now **{status}**."
-        )
+        if not player.autoplay:
+            player.remove_autoplay_songs()
 
-        if player.autoplay and player.queue.empty() and player.history:
+        if player.np_msg:
+            try:
+                view = PlayerView(self, player)
+                await player.np_msg.edit(embed=player.build_np_embed(), view=view)
+            except Exception:
+                pass
+
+        status = "enabled" if player.autoplay else "disabled"
+        msg = f"📻 Autoplay is now **{status}**."
+        if (
+            player.autoplay
+            and not player.current
+            and player.queue.empty()
+            and not player.history
+        ):
+            msg += " (Autoplay will start once a track is played to seed recommendations.)"
+        await interaction.response.send_message(msg)
+
+        has_auto = any(
+            getattr(s, "is_autoplay", False) for s in player.queue._queue
+        )
+        if player.autoplay and not has_auto and (player.current or player.history):
             self.spawn_background(player.prefetch_autoplay())
 
     @app_commands.command(name="loop", description="Set loop mode (off, track, queue)")
@@ -1096,6 +1234,51 @@ class MusicCog(commands.Cog):
             )
 
     @app_commands.command(
+        name="skipto",
+        description="Skip directly to a specific track position in the queue",
+    )
+    async def skipto(self, interaction: discord.Interaction, index: int):
+        if not await self.verify_voice(interaction):
+            return
+        if not await check_dj_permission(
+            interaction,
+            "❌ You need the 'DJ' role or Manage Server permissions to use this command.",
+        ):
+            return
+
+        player = self.get_player(interaction)
+        voice_client = interaction.guild.voice_client
+        if not player.current or not voice_client:
+            return await interaction.response.send_message(
+                "Nothing is currently playing to skip.", ephemeral=True
+            )
+
+        queue_len = len(player.queue._queue)
+        if index < 1 or index > queue_len:
+            return await interaction.response.send_message(
+                f"❌ Invalid queue index {index}. Queue has {queue_len} track(s).",
+                ephemeral=True,
+            )
+
+        discard_count = index - 1
+        for _ in range(discard_count):
+            item = player.queue.remove_at(0)
+            if item.added_msg:
+                self.spawn_background(player._delete_and_untrack(item.added_msg))
+
+        target_title = (
+            player.queue._queue[0].title if not player.queue.empty() else "selected track"
+        )
+        player.skip_votes.clear()
+        player.manual_skip = True
+        if voice_client.is_playing() or voice_client.is_paused():
+            voice_client.stop()
+
+        await interaction.response.send_message(
+            f"⏭️ Skipped directly to track {index} (**{target_title}**)."
+        )
+
+    @app_commands.command(
         name="seek", description="Seek to a timestamp (e.g. 1:30 or 90 seconds)"
     )
     async def seek(self, interaction: discord.Interaction, timestamp: str):
@@ -1131,9 +1314,21 @@ class MusicCog(commands.Cog):
                 "❌ Invalid timestamp format. Use `mm:ss` or seconds.", ephemeral=True
             )
 
+        if player.current.duration and seconds >= player.current.duration:
+            dur = player.current.duration
+            m, s = divmod(dur, 60)
+            h, m = divmod(m, 60)
+            dur_fmt = f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+            return await interaction.response.send_message(
+                f"❌ Seek position exceeds track duration (`{dur_fmt}`).",
+                ephemeral=True,
+            )
+
         try:
             player.seek_position = seconds
             player.is_seeking = True
+            player.paused_at = None
+            player.total_paused = 0.0
             interaction.guild.voice_client.stop()
             await interaction.response.send_message(
                 f"⏩ Seeked to `{timestamp}`."
@@ -1166,6 +1361,8 @@ class MusicCog(commands.Cog):
         try:
             player.seek_position = 0
             player.is_seeking = True
+            player.paused_at = None
+            player.total_paused = 0.0
             interaction.guild.voice_client.stop()
             await interaction.response.send_message(
                 "🔄 Replaying current song."

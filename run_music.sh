@@ -1,5 +1,7 @@
 #!/bin/bash
-export PATH="/home/wolf/.deno/bin:$PATH"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PATH="$HOME/.deno/bin:$PATH"
+cd "$SCRIPT_DIR"
 
 if systemctl --user is-active --quiet musiqbot.service; then
     echo "MusiqBot is currently running as a systemd background service (musiqbot.service)."
@@ -11,6 +13,6 @@ fi
 # Automatically kill any previously running instances of music_bot.py
 pkill -9 -f "music_bot.py" 2>/dev/null || true
 
-source venv/bin/activate
-exec watchmedo auto-restart --directory=./ --pattern="*.py" --ignore-patterns="venv/*;__pycache__/*;.git/*" --recursive -- python music_bot.py
+source "$SCRIPT_DIR/venv/bin/activate"
+exec watchmedo auto-restart --directory="$SCRIPT_DIR" --pattern="*.py" --ignore-patterns="venv/*;__pycache__/*;.git/*" --recursive -- python music_bot.py
 

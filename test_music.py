@@ -2094,10 +2094,654 @@ async def test_dj_vote_clears_existing_votes_on_instant_skip(cog, interaction):
     vc.stop.assert_called_once()
 
 
+# ==============================================================================
+# BOOST TEST SUITE: Bug Fixes & New Features
+# ==============================================================================
 
 
+@pytest.mark.asyncio
+async def test_music_queue_remove_at_accounting():
+    from music.player import MusicQueue
+
+    q = MusicQueue()
+    song1 = Song({"title": "S1", "webpage_url": "http://1"}, MagicMock())
+    song2 = Song({"title": "S2", "webpage_url": "http://2"}, MagicMock())
+    await q.put(song1)
+    await q.put(song2)
+
+    assert q._unfinished_tasks == 2
+    assert not q._finished.is_set()
+
+    removed = q.remove_at(0)
+    assert removed == song1
+    assert q._unfinished_tasks == 1
+    assert not q._finished.is_set()
+
+    removed2 = q.remove_at(0)
+    assert removed2 == song2
+    assert q._unfinished_tasks == 0
+    assert q._finished.is_set()
+
+    with pytest.raises(IndexError):
+        q.remove_at(0)
+
+    with pytest.raises(IndexError):
+        q.remove_at(-1)
 
 
+@pytest.mark.asyncio
+async def test_move_autoplay_partition_and_promotion(cog, interaction):
+    player = cog.get_player(interaction)
+    user_song1 = Song({"title": "U1", "webpage_url": "http://u1"}, interaction.user)
+    user_song2 = Song({"title": "U2", "webpage_url": "http://u2"}, interaction.user)
+    auto_song = Song(
+        {"title": "A1", "webpage_url": "http://a1"}, interaction.user, is_autoplay=True
+    )
+
+    await player.queue.put(user_song1)
+    await player.queue.put(user_song2)
+    await player.queue.put(auto_song)
+
+    assert player.queue._queue[2].is_autoplay is True
+
+    # Moving autoplay song to user territory promotes it to user track
+    moved = player.move(2, 0)
+    assert moved == auto_song
+    assert moved.is_autoplay is False
+    assert player.queue._queue[0] == moved
 
 
+def test_ytdl_lock_thread_safety():
+    import threading
 
+    from music import ytdl_lock as music_lock
+    from music.config import ytdl_lock as config_lock
+    from music_cog import ytdl_lock as cog_lock
+
+    assert config_lock is music_lock
+    assert cog_lock is music_lock
+    assert isinstance(config_lock, type(threading.Lock()))
+
+    acquired = config_lock.acquire(timeout=1.0)
+    assert acquired is True
+    config_lock.release()
+
+
+def test_is_direct_stream_url_and_song_clone():
+    from music.utils import is_direct_stream_url
+
+    stream_urls = [
+        {"url": "https://rr1---sn-abc.googlevideo.com/videoplayback?expire=123"},
+        {"url": "https://example.com/live/index.m3u8"},
+        {"url": "https://example.com/audio.mp3"},
+    ]
+    for data in stream_urls:
+        assert is_direct_stream_url(data) is True
+
+    web_urls = [
+        {"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+        {"url": "https://soundcloud.com/artist/track"},
+        {"url": "https://open.spotify.com/track/123"},
+    ]
+    for data in web_urls:
+        assert is_direct_stream_url(data) is False
+
+    # Song clone preserves _extracted_at
+    fixed_ts = 1700000000.0
+    s1 = Song(
+        {"title": "Test", "webpage_url": "http://x", "_extracted_at": fixed_ts},
+        MagicMock(),
+    )
+    assert s1.extracted_at == fixed_ts
+    assert s1.data.get("_extracted_at") == fixed_ts
+
+    s2 = Song(s1.data, MagicMock())
+    assert s2.extracted_at == fixed_ts
+    assert s2.data.get("_extracted_at") == fixed_ts
+
+
+@pytest.mark.asyncio
+async def test_player_np_msg_in_place_edit_on_seek(cog, interaction):
+    player = cog.get_player(interaction)
+    song = Song(
+        {"title": "Seekable Song", "webpage_url": "http://x", "duration": 200},
+        interaction.user,
+    )
+    player.current = song
+    player.np_msg = AsyncMock(spec=discord.Message)
+    player.is_seeking = True
+    player.seek_position = 30
+    player._is_instant_fail = MagicMock(return_value=False)
+
+    vc = interaction.guild.voice_client
+    vc.is_connected = MagicMock(return_value=True)
+    vc.play = MagicMock(side_effect=lambda s, after: player.next.set())
+
+    with patch("music_cog.YTDLSource.create_source", new_callable=AsyncMock) as mock_src:
+        mock_source = MagicMock()
+        mock_source.data = {"title": "Seekable Song", "webpage_url": "http://x", "duration": 200}
+        mock_src.return_value = mock_source
+
+        # Terminate loop after one iteration
+        player.bot.is_closed = MagicMock(side_effect=[False, True])
+
+        await player.player_loop()
+
+        # np_msg should be edited in-place, NOT sent anew
+        player.np_msg.edit.assert_awaited()
+        player.channel.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_delete_and_untrack_message(cog, interaction):
+    player = cog.get_player(interaction)
+    msg = AsyncMock(spec=discord.Message)
+    msg.id = 99999
+    msg.channel.id = 88888
+    msg.guild.id = interaction.guild.id
+
+    cog.track_message(interaction.guild.id, msg)
+    assert str(interaction.guild.id) in cog.orphan_index
+
+    await player._delete_and_untrack(msg)
+    msg.delete.assert_awaited_once()
+    assert str(interaction.guild.id) not in cog.orphan_index
+
+
+@pytest.mark.asyncio
+async def test_remove_untracks_and_deletes_added_msg(cog, interaction):
+    player = cog.get_player(interaction)
+    song = Song({"title": "Track to Remove", "webpage_url": "http://x"}, interaction.user)
+    msg = AsyncMock(spec=discord.Message)
+    msg.id = 11111
+    msg.channel.id = 22222
+    msg.guild.id = interaction.guild.id
+    song.added_msg = msg
+
+    cog.track_message(interaction.guild.id, msg)
+    await player.queue.put(song)
+
+    with patch.object(player, "_delete_and_untrack", new_callable=AsyncMock) as mock_del:
+        removed = player.remove(0)
+        assert removed == song
+        mock_del.assert_called_once_with(msg)
+
+
+@pytest.mark.asyncio
+async def test_voice_state_update_prunes_votes_and_triggers_skip(cog, interaction):
+    player = cog.get_player(interaction)
+    requester = MagicMock()
+    requester.id = 999
+    player.current = Song({"title": "Voted Track", "webpage_url": "http://x"}, requester)
+
+    member1 = MagicMock(bot=False)
+    member1.id = 101
+    member1.guild = interaction.guild
+    member2 = MagicMock(bot=False)
+    member2.id = 102
+    member2.guild = interaction.guild
+    member3 = MagicMock(bot=False)
+    member3.id = 103
+    member3.guild = interaction.guild
+
+    vc = interaction.guild.voice_client
+    vc.channel.members = [member1, member2, member3]
+    vc.is_playing = MagicMock(return_value=True)
+    vc.stop = MagicMock()
+
+    # Required votes for 3 humans is 3 // 2 + 1 = 2
+    assert player.required_skip_votes() == 2
+    # Member 1 and Member 2 vote
+    player.skip_votes.add(101)
+    player.skip_votes.add(102)
+
+    # Simulate member 1 leaving VC
+    before_state = MagicMock(channel=vc.channel)
+    after_state = MagicMock(channel=None)
+
+    vc.channel.members = [member2, member3]
+    await cog.on_voice_state_update(member1, before_state, after_state)
+
+    # 101's vote should be pruned
+    assert 101 not in player.skip_votes
+    assert player.skip_votes == {102}
+    # Required votes for 2 humans is 2 // 2 + 1 = 2
+    # 1 < 2, so skip should not have fired yet
+    vc.stop.assert_not_called()
+
+    # Now member 3 leaves VC: only member 2 remains
+    vc.channel.members = [member2]
+    await cog.on_voice_state_update(member3, before_state, after_state)
+
+    # Required votes for 1 human is 1 // 2 + 1 = 1
+    # Member 2's vote {102} now meets the required threshold 1
+    vc.stop.assert_called_once()
+    assert player.manual_skip is True
+
+
+@pytest.mark.asyncio
+async def test_autoplay_toggle_cleanup_and_prefetch(cog, interaction):
+    player = cog.get_player(interaction)
+    player.autoplay = True
+    song_user = Song({"title": "User Song", "webpage_url": "http://u"}, interaction.user)
+    song_auto = Song(
+        {"title": "Auto Song", "webpage_url": "http://a"}, interaction.user, is_autoplay=True
+    )
+
+    await player.queue.put(song_user)
+    await player.queue.put(song_auto)
+    assert player.queue.qsize() == 2
+
+    # Toggle autoplay OFF
+    await cog.autoplay.callback(cog, interaction)
+    assert player.autoplay is False
+    # Autoplay song should have been purged, leaving only user song
+    assert player.queue.qsize() == 1
+    remaining = await player.queue.get()
+    assert remaining == song_user
+
+    # Toggle autoplay ON while track is currently playing
+    player.current = song_user
+    interaction.response.send_message.reset_mock()
+    with patch.object(player, "prefetch_autoplay", new_callable=AsyncMock) as mock_prefetch:
+        await cog.autoplay.callback(cog, interaction)
+        assert player.autoplay is True
+        mock_prefetch.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_seek_duration_bounds_and_pause_reset(cog, interaction):
+    player = cog.get_player(interaction)
+    song = Song(
+        {"title": "Bounded Track", "webpage_url": "http://x", "duration": 180},
+        interaction.user,
+    )
+    player.current = song
+
+    # 1. Out of bounds seek (240s > 180s duration)
+    await cog.seek.callback(cog, interaction, timestamp="04:00")
+    interaction.response.send_message.assert_called_once()
+    msg = interaction.response.send_message.call_args.args[0]
+    assert "exceeds track duration" in msg
+    assert player.is_seeking is False
+
+    # 2. In bounds seek resets paused_at and total_paused
+    interaction.response.send_message.reset_mock()
+    player.paused_at = 123456.0
+    player.total_paused = 45.0
+    vc = interaction.guild.voice_client
+    vc.stop = MagicMock()
+
+    await cog.seek.callback(cog, interaction, timestamp="01:30")
+    assert player.is_seeking is True
+    assert player.seek_position == 90
+    assert player.paused_at is None
+    assert player.total_paused == 0.0
+    vc.stop.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_search_select_voice_channel_check(cog, interaction):
+    from music_cog import SearchSelect
+
+    entries = [{"title": "Track 1", "duration": 120, "webpage_url": "http://1"}]
+    select = SearchSelect(entries, cog)
+
+    with patch.object(cog, "verify_voice", new_callable=AsyncMock, return_value=False):
+        await select.callback(interaction)
+        assert len(cog.get_player(interaction).queue._queue) == 0
+
+
+def test_youtube_playlist_url_detection():
+    def is_yt_playlist(url: str) -> bool:
+        is_yt_domain = any(
+            d in url for d in ("youtube.com", "music.youtube.com", "youtu.be")
+        )
+        if is_yt_domain and "list=" in url:
+            if "/playlist?list=" in url:
+                return True
+            if "list=RD" in url or "list=UL" in url:
+                return False
+            return True
+        return False
+
+    assert is_yt_playlist("https://www.youtube.com/playlist?list=PL123") is True
+    assert is_yt_playlist("https://youtu.be/abc?list=PL123") is True
+    assert is_yt_playlist("https://www.youtube.com/watch?v=abc&list=PL123") is True
+    assert is_yt_playlist("https://www.youtube.com/watch?v=abc&list=RD123") is False
+    assert is_yt_playlist("https://www.youtube.com/watch?v=abc&list=UL123") is False
+
+
+@pytest.mark.asyncio
+async def test_spotify_playlist_resolver():
+    from music.services.spotify import resolve_spotify, resolve_spotify_playlist
+
+    fake_html = """
+    <html><body>
+    <script id="__NEXT_DATA__" type="application/json">
+    {"props":{"pageProps":{"state":{"data":{"entity":{"trackList":[
+        {"title":"Track Alpha","subtitle":"Artist A"},
+        {"title":"Track Beta","subtitle":"Artist B"}
+    ]}}}}}}
+    </script>
+    </body></html>
+    """
+
+    mock_resp = AsyncMock()
+    mock_resp.status = 200
+    mock_resp.text = AsyncMock(return_value=fake_html)
+
+    mock_session = MagicMock()
+    mock_session.get.return_value.__aenter__.return_value = mock_resp
+
+    tracks = await resolve_spotify_playlist(
+        mock_session, "https://open.spotify.com/playlist/test123"
+    )
+    assert len(tracks) == 2
+    assert tracks[0] == "ytsearch:Track Alpha - Artist A"
+    assert tracks[1] == "ytsearch:Track Beta - Artist B"
+
+    # Test single track resolve with author_name
+    mock_oembed_resp = AsyncMock()
+    mock_oembed_resp.status = 200
+    mock_oembed_resp.json = AsyncMock(
+        return_value={"title": "Song Title", "author_name": "Author Name"}
+    )
+    mock_session.get.return_value.__aenter__.return_value = mock_oembed_resp
+    track = await resolve_spotify(mock_session, "https://open.spotify.com/track/123")
+    assert track == "ytsearch:Song Title - Author Name"
+
+
+@pytest.mark.asyncio
+async def test_player_view_autoplay_and_replay_buttons(cog, interaction):
+    from music.views.player_view import PlayerView
+
+    player = cog.get_player(interaction)
+    player.autoplay = False
+    player.current = Song({"title": "Active Song", "webpage_url": "http://x"}, interaction.user)
+    vc = interaction.guild.voice_client
+    vc.is_playing = MagicMock(return_value=True)
+    vc.stop = MagicMock()
+
+    view = PlayerView(cog, player)
+
+    # 1. Autoplay button toggle
+    assert player.autoplay is False
+    await view.autoplay_toggle.callback(interaction)
+    assert player.autoplay is True
+    assert view.autoplay_toggle.style == discord.ButtonStyle.green
+
+    # 2. Replay button
+    interaction.response.send_message.reset_mock()
+    await view.replay_button.callback(interaction)
+    assert player.is_seeking is True
+    assert player.seek_position == 0
+    vc.stop.assert_called_once()
+
+    # 3. Pause button updates np_msg
+    player.np_msg = AsyncMock(spec=discord.Message)
+    await view.pause_resume.callback(interaction)
+    player.np_msg.edit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_queue_view_duration_formatting_and_refresh(cog, interaction):
+    from music.views.queue_view import QueueView
+
+    player = cog.get_player(interaction)
+    player.current = Song(
+        {"title": "Track 0", "webpage_url": "http://0", "duration": 60}, interaction.user
+    )
+    s1 = Song({"title": "Track 1", "webpage_url": "http://1", "duration": 125}, interaction.user)
+    s2 = Song({"title": "Track 2", "webpage_url": "http://2", "duration": 65}, interaction.user)
+    await player.queue.put(s1)
+    await player.queue.put(s2)
+
+    view = QueueView(player, interaction.user)
+    embed = view.build_embed()
+
+    # Check formatted duration in rows: 125s -> (2:05), 65s -> (1:05)
+    assert "(`2:05`)" in embed.description
+    assert "(`1:05`)" in embed.description
+    # Check total duration in footer: 60 + 125 + 65 = 250s = 4m 10s
+    assert "Queue Duration: 4m 10s" in embed.footer.text
+
+    # Test refresh button
+    interaction.response.edit_message = AsyncMock()
+    await view.refresh_page.callback(interaction)
+    interaction.response.edit_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_autocomplete_bounded_lru_cache(interaction):
+    from music.services.autocomplete import fetch_song_autocomplete
+
+    cache = {}
+    for i in range(500):
+        cache[f"query_{i}"] = [f"result_{i}"]
+
+    mock_session = MagicMock()
+    mock_resp = AsyncMock()
+    mock_resp.status = 200
+    mock_resp.json = AsyncMock(return_value=["query_new", ["result_new"]])
+    mock_session.get.return_value.__aenter__.return_value = mock_resp
+
+    choices = await fetch_song_autocomplete(interaction, "query_new", mock_session, cache)
+    assert len(choices) == 1
+    assert choices[0].name == "result_new"
+    assert len(cache) == 500
+    assert "query_0" not in cache
+    assert "query_new" in cache
+
+    # LRU reorder test
+    interaction.is_expired = MagicMock(return_value=False)
+    await fetch_song_autocomplete(interaction, "query_1", mock_session, cache)
+    assert next(iter(cache)) == "query_2"
+
+
+@pytest.mark.asyncio
+async def test_skipto_command(cog, interaction):
+    player = cog.get_player(interaction)
+    player.current = Song({"title": "Current", "webpage_url": "http://c"}, interaction.user)
+    for i in range(1, 6):
+        await player.queue.put(
+            Song({"title": f"Song {i}", "webpage_url": f"http://{i}"}, interaction.user)
+        )
+
+    vc = interaction.guild.voice_client
+    vc.is_playing = MagicMock(return_value=True)
+    vc.stop = MagicMock()
+
+    # Non-DJ cannot use skipto
+    _make_non_dj(interaction.user)
+    await cog.skipto.callback(cog, interaction, index=3)
+    vc.stop.assert_not_called()
+
+    # DJ can use skipto
+    interaction.user.guild_permissions.manage_guild = True
+    interaction.response.send_message.reset_mock()
+    await cog.skipto.callback(cog, interaction, index=3)
+
+    # Songs 1 and 2 discarded, Song 3 is now at front of queue
+    assert player.queue.qsize() == 3
+    assert player.queue._queue[0].title == "Song 3"
+    assert player.manual_skip is True
+    vc.stop.assert_called_once()
+
+    # Invalid index
+    interaction.response.send_message.reset_mock()
+    await cog.skipto.callback(cog, interaction, index=99)
+    assert "Invalid queue index" in interaction.response.send_message.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_history_command(cog, interaction):
+    player = cog.get_player(interaction)
+
+    # Empty history
+    await cog.history.callback(cog, interaction)
+    msg = interaction.response.send_message.call_args.args[0]
+    assert "No playback history" in msg
+
+    # Populated history
+    interaction.response.send_message.reset_mock()
+    player.track_history = [
+        {"title": "Track Alpha", "url": "https://yt.com/a"},
+        {"title": "Track Beta", "url": "https://yt.com/b"},
+    ]
+    await cog.history.callback(cog, interaction)
+    embed = interaction.response.send_message.call_args.kwargs["embed"]
+    assert "Track Alpha" in embed.description
+    assert "Track Beta" in embed.description
+
+
+@pytest.mark.asyncio
+async def test_replay_command_resets_pause_state(cog, interaction):
+    player = cog.get_player(interaction)
+    player.current = Song({"title": "Test", "webpage_url": "http://x"}, interaction.user)
+    player.paused_at = 9999.0
+    player.total_paused = 50.0
+    vc = interaction.guild.voice_client
+    vc.stop = MagicMock()
+
+    await cog.replay.callback(cog, interaction)
+    assert player.is_seeking is True
+    assert player.seek_position == 0
+    assert player.paused_at is None
+    assert player.total_paused == 0.0
+    vc.stop.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_pause_resume_autoplay_commands_edit_np_msg(cog, interaction):
+    player = cog.get_player(interaction)
+    player.current = Song({"title": "Test", "webpage_url": "http://x"}, interaction.user)
+    player.current_start_time = 1000.0
+    player.np_msg = AsyncMock(spec=discord.Message)
+    vc = interaction.guild.voice_client
+    vc.is_playing = MagicMock(return_value=True)
+    vc.is_paused = MagicMock(return_value=False)
+    vc.pause = MagicMock()
+    vc.resume = MagicMock()
+
+    # Pause command edits np_msg
+    await cog.pause.callback(cog, interaction)
+    assert player.paused_at is not None
+    player.np_msg.edit.assert_awaited()
+
+    # Resume command edits np_msg
+    player.np_msg.edit.reset_mock()
+    vc.is_playing.return_value = False
+    vc.is_paused.return_value = True
+    await cog.resume.callback(cog, interaction)
+    assert player.paused_at is None
+    player.np_msg.edit.assert_awaited()
+
+    # Autoplay toggle edits np_msg
+    player.np_msg.edit.reset_mock()
+    await cog.autoplay.callback(cog, interaction)
+    player.np_msg.edit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_player_view_pause_button_style(cog, interaction):
+    from music.views.player_view import PlayerView
+
+    player = cog.get_player(interaction)
+    player.current = Song({"title": "Test", "webpage_url": "http://x"}, interaction.user)
+    view = PlayerView(cog, player)
+
+    # When playing, ⏯️ is primary
+    player.paused_at = None
+    view.update_buttons()
+    pause_btn = [
+        c for c in view.children if getattr(c, "emoji", None) and str(c.emoji) == "⏯️"
+    ][0]
+    assert pause_btn.style == discord.ButtonStyle.primary
+
+    # When paused, ⏯️ is secondary
+    player.paused_at = 12345.0
+    view.update_buttons()
+    assert pause_btn.style == discord.ButtonStyle.secondary
+
+
+@pytest.mark.asyncio
+async def test_queue_view_shrinkage_page_clamping(cog, interaction):
+    from music.views.queue_view import QueueView
+
+    player = cog.get_player(interaction)
+    for i in range(25):
+        await player.queue.put(
+            Song({"title": f"T{i}", "webpage_url": f"http://{i}"}, interaction.user)
+        )
+    view = QueueView(player, interaction.user)
+    view.current_page = 2  # page 3 of 3
+    view.update_buttons()
+    assert view.current_page == 2
+
+    # Queue shrinks to 5 items (only 1 page)
+    player.queue._queue.clear()
+    for i in range(5):
+        await player.queue.put(
+            Song({"title": f"T{i}", "webpage_url": f"http://{i}"}, interaction.user)
+        )
+
+    # Calling update_buttons clamps current_page to 0 and disables buttons appropriately
+    view.update_buttons()
+    assert view.current_page == 0
+    assert view.children[0].disabled is True
+    assert view.children[1].disabled is True
+
+
+@pytest.mark.asyncio
+async def test_queue_view_on_timeout_untracks_message(cog, interaction):
+    from music.views.queue_view import QueueView
+
+    player = cog.get_player(interaction)
+    view = QueueView(player, interaction.user)
+    msg = AsyncMock(spec=discord.Message)
+    view.message = msg
+    player.queue_msg = msg
+
+    with patch.object(player, "_delete_and_untrack", new_callable=AsyncMock) as mock_del:
+        await view.on_timeout()
+        mock_del.assert_called_once_with(msg)
+        assert player.queue_msg is None
+
+
+@pytest.mark.asyncio
+async def test_handle_skip_request_prunes_stale_votes_before_check(cog, interaction):
+    player = cog.get_player(interaction)
+    requester = MagicMock()
+    requester.id = 999
+    player.current = Song({"title": "Voted Track", "webpage_url": "http://x"}, requester)
+
+    member1 = _make_non_dj(MagicMock())
+    member1.id = 101
+    member2 = _make_non_dj(MagicMock())
+    member2.id = 102
+    member3 = _make_non_dj(MagicMock())
+    member3.id = 103
+
+    vc = interaction.guild.voice_client
+    vc.channel.members = [member1, member2, member3]
+    vc.is_playing = MagicMock(return_value=True)
+    vc.stop = MagicMock()
+
+    # Member 1 votes
+    interaction.user = member1
+    await cog.handle_skip_request(interaction)
+    assert player.skip_votes == {101}
+
+    # Member 1 leaves the voice channel (now only member 2 and member 3 remain)
+    vc.channel.members = [member2, member3]
+
+    # Member 2 votes (skip request should prune member 1's stale vote)
+    interaction.user = member2
+    interaction.response.send_message.reset_mock()
+    await cog.handle_skip_request(interaction)
+
+    # Member 1's vote should have been pruned, so only Member 2's vote remains (1/2)
+    assert 101 not in player.skip_votes
+    assert player.skip_votes == {102}
+    vc.stop.assert_not_called()

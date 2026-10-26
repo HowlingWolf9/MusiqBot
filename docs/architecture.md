@@ -125,6 +125,9 @@ Key behaviors:
 - **Stream URL freshness** — yt-dlp metadata carries `extracted_at`; URLs
   younger than one hour are reused without a second network round-trip,
   otherwise the track is re-extracted (YouTube stream URLs expire).
+- **Seek-in-place** — seeking or replaying edits the existing Now Playing embed
+  in place (`await np_msg.edit(embed=embed, view=view)`) rather than destroying
+  and reposting, eliminating UI flicker.
 - **Instant-fail detection** — if playback ends < 1.5 s after starting, and
   the track's known duration is either unknown (`0`) or greater than 2 s, the
   stream never actually played (403 / instant EOF); it's reported as
@@ -184,6 +187,10 @@ FFmpeg's user agent or require PO tokens, producing instant 403s.
 FFmpeg options add resilient reconnect flags (`-reconnect 1
 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin`) and `-vn`.
 
+Thread-safety is guaranteed by `ytdl_lock` (`threading.Lock()`), which serializes
+concurrent calls to `YoutubeDL.extract_info()` offloaded to executor threads,
+preventing race conditions within yt-dlp's internal state.
+
 ### Search ranking (`audio.py::select_best_search_entry`)
 
 Scored ordering of `ytsearch5` results:
@@ -202,11 +209,17 @@ Ties break toward earlier results.
 Wraps `discord.PCMVolumeTransformer` around `FFmpegPCMAudio`:
 
 - `extract_info()` forces bare queries through `ytsearch5:` and applies the
-  ranking above; direct URLs take the first entry.
+  ranking above; direct URLs take the first entry. All calls are serialized
+  by `ytdl_lock`.
 - `create_source()` injects `-ss <seek>` for seeks and copies yt-dlp's
   negotiated `User-Agent` header into FFmpeg's `before_options`
   (quotes/backslashes stripped) so googlevideo doesn't 403 the default
   `Lavf` agent.
+- `is_direct_stream_url()` differentiates between raw media stream URLs
+  (googlevideo, m3u8, direct audio) and webpage/service URLs (YouTube, Spotify,
+  SoundCloud). Fresh streams (< 1 hour old) are reused directly for seeks, while
+  webpage URLs trigger extraction. Cloned songs in loop modes retain original
+  `_extracted_at` timestamps.
 
 ### `SilencePrimer`
 
@@ -218,13 +231,15 @@ silence) before real audio, protecting each track's opening seconds.
 ## Services
 
 - **Spotify** (`services/spotify.py`) — public oEmbed endpoint
-  (`open.spotify.com/oembed`) returns the track title; suffix boilerplate is
-  stripped and the result becomes `ytsearch:<clean title>`. No API keys.
+  (`open.spotify.com/oembed`) returns the track title and author; suffix
+  boilerplate is stripped and the result becomes `ytsearch:<title> - <artist>`.
+  Playlists and albums are scraped via embed pages (`/embed/{type}/{id}`),
+  extracting up to 100 tracks without API keys.
 - **Autocomplete** (`services/autocomplete.py`) — Google suggest API
   (`suggestqueries.google.com/complete/search?client=firefox&ds=yt`) with a
-  hard 0.4 s budget; results cached in a ≤500-entry dict (cleared wholesale
-  when oversized). Expired interactions short-circuit; failures fall back to
-  echoing the typed text.
+  hard 0.4 s budget; results cached in a ≤500-entry LRU cache with oldest-key
+  eviction on overflow and recency refreshed on lookup. Expired interactions
+  short-circuit; failures fall back to echoing the typed text.
 
 ## Permissions Model (`permissions.py`)
 

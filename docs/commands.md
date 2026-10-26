@@ -47,9 +47,11 @@ one live player UI per guild. Acknowledged ephemerally.
 | `/pause` | Pauses playback |
 | `/resume` | Resumes paused playback |
 | `/skip` | DJ: skips instantly. Non-DJ in the bot's voice channel: registers a **skip vote** (see below) |
-| `/stop` | Clears queue **and** history, stops playback. Player idles out after 5 min |
+| `/skipto index` | DJ: skips directly to track number `index` in the queue, discarding preceding tracks |
+| `/stop` | Clears queue, stops playback (history is preserved). Player idles out after 5 min |
 | `/seek timestamp` | Jumps within the current track. Accepts `90`, `1:30`, or `1:05:30` |
 | `/replay` | Restarts the current track from 0:00 |
+| `/history` | Shows recent playback history with titles and clickable links (ephemeral) |
 
 ### Vote skip
 
@@ -61,11 +63,11 @@ Listeners without DJ privileges can still get rid of the current track:
   in the voice channel; a lone listener with the bot skips immediately.
 - The current track's requester can always skip their own pick without
   votes.
-- Votes reset every time a new track starts.
+- Votes reset every time a new track starts and are pruned if a voter leaves VC.
 
 Seeking works by stopping the voice client with a pending seek position; the
 player loop re-resolves the stream with an FFmpeg `-ss` offset and keeps the
-same track context (Now Playing embed is not recreated).
+same track context (Now Playing embed is updated in place).
 
 ### Volume
 
@@ -79,10 +81,10 @@ DJ-only. Applied instantly to the active source, stored on the player, and
 
 | Command | Description |
 |---|---|
-| `/queue` | Shows an ephemeral paginated view (10 tracks/page) of the upcoming queue plus the currently playing track. Prev/next buttons; expires (and deletes itself) after 3 minutes |
+| `/queue` | Shows an ephemeral paginated view (10 tracks/page) of upcoming queue with formatted track durations `(mm:ss)`, total duration in footer, and a 🔄 Refresh button. Prev/next buttons; expires after 3 minutes |
 | `/shuffle` | Shuffles the queue while preserving the user-requests-before-autoplay ordering invariant |
 | `/remove index` | Removes the track at `index` (1-based, as displayed by `/queue`). Also deletes its "Added to Queue" message |
-| `/move from_index to_index` | Moves a queued track between positions (1-based) |
+| `/move from_index to_index` | Moves a queued track between positions (1-based). Moving an autoplay song before user songs promotes it |
 | `/clear` | Removes all upcoming tracks (current track keeps playing) |
 
 ## Modes *(DJ required)*
@@ -112,17 +114,19 @@ Loop mode and autoplay are also reachable from the Now Playing embed buttons
 
 ## Now Playing Embed Buttons
 
-The persistent player UI exposes five buttons. You must be in the bot's voice
-channel to use them. All require DJ privileges **except ⏭️**, which lets
-non-DJs register a skip vote (identical to `/skip`):
+The persistent player UI exposes seven buttons organized in two rows. You
+must be in the bot's voice channel to use them. All require DJ privileges
+**except ⏭️**, which lets non-DJs register a skip vote (identical to `/skip`):
 
-| Button | Action |
-|---|---|
-| ⏯️ | Pause ↔ Resume |
-| ⏭️ | Skip (DJ) / vote to skip (everyone else in the voice channel) |
-| ⏹️ | Stop & clear queue/history |
-| 🔁 | Cycle loop mode Off → Track → Queue (button label/color reflects state) |
-| 🔀 | Shuffle queue |
+| Button | Row | Action |
+|---|---|---|
+| ⏯️ | 0 | Pause ↔ Resume (live updates embed title and footer with `[Paused]`) |
+| ⏭️ | 0 | Skip (DJ) / vote to skip (everyone else in the voice channel) |
+| ⏹️ | 0 | Stop & clear queue (preserves history for `/history` and autoplay) |
+| 🔁 | 0 | Cycle loop mode Off → Track → Queue (button label/color reflects state) |
+| 🔀 | 0 | Shuffle queue |
+| 📻 | 1 | Toggle autoplay (turns green when active; cleans up auto-queued tracks when turned off) |
+| 🔄 | 1 | Replay current track from 0:00 (edits player embed in place) |
 
 Anyone may *view* the embed, but pressing a DJ-only button without DJ
 privileges gets an ephemeral rejection.
